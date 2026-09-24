@@ -106,7 +106,7 @@ app.get('/indoor-sky/restart', (req, res) => {
 });
 
 function fetchElectric(path, res, transform) {
-  const request = http.get({ host: '192.168.50.13', port: 80, path, timeout: 15000 }, response => {
+  const request = http.get({ host: 'electric-sky.local', port: 80, path, timeout: 15000 }, response => {
     const chunks = [];
     response.on('data', chunk => chunks.push(chunk));
     response.on('end', () => {
