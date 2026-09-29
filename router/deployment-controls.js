@@ -2,10 +2,19 @@
 function injectDeploymentControl(html, node) {
   if (!['electric-sky', 'indoor-sky'].includes(node) || html.includes('id="wb-deployment"')) return html;
   const control = `<section id="wb-deployment" data-node="${node}"></section>`;
+  const title = node === 'electric-sky' ? 'ELECTRIC SKY' : 'INDOOR SKY';
+  html = html.replace(/<h1\b[^>]*>[\s\S]*?<\/h1>/i,
+    `<h1 class="es-breadcrumb"><a href="/">ELECTRIC SEA</a> &middot; ${title}</h1>`)
+    .replace(/<\/header>/i, '<button id="es-admin-toggle" type="button">Unlock admin</button></header>');
   const withControl = /<\/header>/i.test(html) ? html.replace(/<\/header>/i, `</header>${control}`) :
     html.replace(/<body[^>]*>/i, match => match + control);
   return withControl.replace(/<\/head>/i, '<link rel="stylesheet" href="/deployment-control.css"></head>')
-    .replace(/<\/body>/i, '<script src="/deployment-control.js" defer></script></body>');
+    .replace(/<\/body>/i, `<dialog id="es-admin-dialog" aria-labelledby="es-admin-title">
+      <form data-auth><h2 id="es-admin-title">Unlock administrator</h2>
+        <label>Password<input name="password" type="password" autocomplete="off" required></label>
+        <p data-auth-message role="status" aria-live="polite"></p>
+        <button>Unlock</button><button type="button" data-auth-cancel>Cancel</button>
+      </form></dialog><script src="/deployment-control.js" defer></script></body>`);
 }
 
 function installDeploymentProxy(app, requireAdmin, env = process.env, transport = fetch) {

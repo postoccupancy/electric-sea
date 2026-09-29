@@ -10,3 +10,17 @@
 #wb-deployment .wb-message{color:#ffcc66}
 #wb-deployment .wb-hint{color:#8ba0af;font-size:11px}
 #wb-deployment [hidden]{display:none!important}
+header:has(#es-admin-toggle){flex-wrap:wrap;align-items:center}
+header .es-breadcrumb{flex:1;min-width:220px}
+.es-breadcrumb a{color:inherit;text-decoration:none}
+.es-breadcrumb a:hover,.es-breadcrumb a:focus-visible{text-decoration:underline}
+#es-admin-toggle{margin-left:auto;align-self:flex-start;white-space:nowrap}
+#es-admin-toggle,#es-admin-dialog button{background:#17212a;color:#adf;border:1px solid #33424e;padding:6px 10px;font:12px monospace;cursor:pointer}
+#es-admin-toggle:disabled,#es-admin-dialog button:disabled{opacity:.5;cursor:wait}
+#es-admin-dialog{width:min(360px,calc(100vw - 32px));border:1px solid #33424e;background:#0c1015;color:#dce6ee;padding:20px;font:12px monospace}
+#es-admin-dialog::backdrop{background:#000a}
+#es-admin-dialog h2{font-size:14px;margin:0 0 16px}
+#es-admin-dialog label{display:block;color:#8ba0af}
+#es-admin-dialog input{display:block;box-sizing:border-box;width:100%;margin-top:8px;background:#080a0d;color:inherit;border:1px solid #33424e;padding:8px;font:inherit}
+#es-admin-dialog [data-auth-message]{color:#ffcc66;min-height:1em}
+@media(max-width:800px){header:has(#es-admin-toggle) .controls{order:3;flex-basis:100%;flex-wrap:wrap}}

@@ -8,12 +8,16 @@ const { injectDeploymentControl, installDeploymentProxy } = require('../deployme
 const { createAdmin } = require('../admin-session');
 
 test('both node dashboards gain one control without altering existing scripts', () => {
-  const html = '<html><head></head><body><header>Sensor</header><main>Scopes</main><script>live()</script></body></html>';
+  const html = '<html><head></head><body><header><h1>Sensor</h1></header><main>Scopes</main><script>live()</script></body></html>';
   for (const node of ['electric-sky', 'indoor-sky']) {
     const result = injectDeploymentControl(html, node);
     assert.ok(result.includes(`data-node="${node}"`));
     assert.ok(result.includes('<script>live()</script>'));
     assert.ok(result.includes('src="/deployment-control.js"'));
+    assert.ok(result.includes(`<a href="/">ELECTRIC SEA</a> &middot; ${node === 'electric-sky' ? 'ELECTRIC SKY' : 'INDOOR SKY'}`));
+    assert.equal((result.match(/id="es-admin-toggle"/g) || []).length, 1);
+    assert.ok(result.indexOf('id="es-admin-toggle"') < result.indexOf('</header>'));
+    assert.ok(result.includes('<dialog id="es-admin-dialog"'));
     assert.equal(injectDeploymentControl(result, node), result);
   }
   assert.equal(injectDeploymentControl(html, 'unknown'), html);
@@ -92,6 +96,12 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
     addEventListener(event, handler) { this[event] = handler; }, focus() {}, reset() {} });
   for (const name of ['auth', 'auth-cancel', 'editor', 'name', 'state', 'location', 'since', 'edit', 'end', 'message', 'refresh', 'lock', 'cancel', 'locate']) elements.set(name, el());
   const auth = elements.get('auth'), editor = elements.get('editor');
+  auth.querySelectorAll = () => [];
+  const adminButton = el();
+  const authMessage = el();
+  const dialog = { open: false, showModal() { this.open = true; }, close() { this.open = false; this.onclose?.(); },
+    addEventListener(event, fn) { this['on' + event] = fn; },
+    querySelector: selector => selector === '[data-auth]' ? auth : selector === '[data-auth-message]' ? authMessage : elements.get('auth-cancel') };
   auth.elements = { password: el() };
   editor.elements = Object.fromEntries(['name', 'location_label', 'latitude', 'longitude', 'altitude_m', 'notes'].map(key => [key, el()]));
   const root = { dataset: { node: 'electric-sky' }, innerHTML: '',
@@ -99,7 +109,7 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
   let active = null, locateCount = 0, authenticated = false;
   const requests = [];
   const context = {
-    document: { getElementById: id => id === 'wb-deployment' ? root : null },
+    document: { getElementById: id => ({ 'wb-deployment': root, 'es-admin-dialog': dialog, 'es-admin-toggle': adminButton }[id] || null) },
     navigator: { geolocation: { getCurrentPosition(success) { locateCount++; success({ coords: { latitude: 1, longitude: 2, altitude: null } }); } } },
     window: { confirm: () => true },
     fetch: async (url, options) => {
@@ -122,9 +132,11 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
   assert.equal(elements.get('name').textContent, 'No active deployment');
   assert.equal(locateCount, 0);
   await elements.get('edit').onclick();
-  assert.equal(auth.hidden, false);
+  assert.equal(dialog.open, true);
   auth.elements.password.value = 'owner-password'; auth.submit({ preventDefault() {} }); await settle();
   assert.equal(auth.elements.password.value, '');
+  assert.equal(dialog.open, false);
+  assert.equal(adminButton.textContent, 'Lock admin');
   elements.get('locate').onclick();
   assert.equal(locateCount, 1);
   assert.equal(editor.elements.latitude.value, 1);
@@ -141,6 +153,13 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
   assert.equal(elements.get('name').textContent, 'No active deployment');
   assert.equal(locateCount, 1);
   assert.ok(requests.every(r => !('X-Ingest-Token' in r.options.headers) && !('X-Status-Token' in r.options.headers)));
-  await elements.get('lock').onclick();
+  await adminButton.onclick();
   assert.equal(elements.get('state').hidden, false);
+  assert.equal(adminButton.textContent, 'Unlock admin');
+  adminButton.onclick();
+  assert.equal(dialog.open, true);
+  auth.elements.password.value = 'unsent';
+  elements.get('auth-cancel').onclick();
+  assert.equal(dialog.open, false);
+  assert.equal(auth.elements.password.value, '');
 });

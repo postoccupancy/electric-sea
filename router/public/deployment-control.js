@@ -3,14 +3,10 @@
   if (!root || !['electric-sky', 'indoor-sky'].includes(root.dataset.node)) return;
   root.innerHTML = `
     <h2>Deployment</h2>
-    <form data-auth hidden><label>Unlock administrator
-      <input name="password" type="password" autocomplete="off" required></label>
-      <button>Unlock</button><button type="button" data-auth-cancel>Cancel</button></form>
     <div data-state><p data-name>Loading deployment...</p><p data-location></p><p data-since></p>
       <button type="button" data-edit>Start deployment</button>
       <button type="button" data-end hidden>End</button>
-      <button type="button" data-refresh>Refresh</button>
-      <button type="button" data-lock hidden>Lock admin</button></div>
+      <button type="button" data-refresh>Refresh</button></div>
     <form data-editor hidden>
       <label>Deployment name<input name="name" required maxlength="255"></label>
       <label>Location label<input name="location_label" maxlength="500"></label>
@@ -26,10 +22,15 @@
     </form>
     <p data-message class="wb-message" role="status" aria-live="polite"></p>`;
   const find = name => root.querySelector(`[data-${name}]`);
-  const auth = find('auth'), editor = find('editor');
+  const dialog = document.getElementById('es-admin-dialog');
+  const adminButton = document.getElementById('es-admin-toggle');
+  const auth = dialog.querySelector('[data-auth]'), editor = find('editor');
+  let isAdmin = false;
   let current = null, editing = null, pendingAction = null;
   let locationRequest = 0;
-  const message = text => { find('message').textContent = text; };
+  const message = text => {
+    (dialog.open ? dialog.querySelector('[data-auth-message]') : find('message')).textContent = text;
+  };
   async function request(action, body) {
     const response = await fetch(`/api/deployments/${root.dataset.node}${action ? '/' + action : ''}`, {
       method: action ? 'POST' : 'GET', cache: 'no-store',
@@ -56,6 +57,8 @@
   async function run(action) {
     message('');
     root.querySelectorAll('button').forEach(button => { button.disabled = true; });
+    adminButton.disabled = true;
+    auth.querySelectorAll('button').forEach(button => { button.disabled = true; });
     try { await action(); }
     catch (error) {
       message(error.message);
@@ -64,7 +67,11 @@
         editor.hidden = true; locationRequest++;
         try { await refresh(); } catch { /* Retain the original conflict explanation. */ }
       }
-    } finally { root.querySelectorAll('button').forEach(button => { button.disabled = false; }); }
+    } finally {
+      root.querySelectorAll('button').forEach(button => { button.disabled = false; });
+      adminButton.disabled = false;
+      auth.querySelectorAll('button').forEach(button => { button.disabled = false; });
+    }
   }
   async function adminRequest(path, body) {
     const response = await fetch('/api/admin/' + path, {
@@ -74,11 +81,15 @@
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || 'Admin request failed');
-    find('lock').hidden = !data.authenticated;
+    isAdmin = data.authenticated;
+    adminButton.textContent = isAdmin ? 'Lock admin' : 'Unlock admin';
     return data;
   }
   function promptAdmin(action) {
-    pendingAction = action; auth.hidden = false; auth.elements.password.focus();
+    pendingAction = action;
+    dialog.querySelector('[data-auth-message]').textContent = '';
+    if (!dialog.open) dialog.showModal();
+    auth.elements.password.focus();
   }
   function authorized(action) {
     return run(async () => {
@@ -91,17 +102,22 @@
     const login = adminRequest('login', { password: auth.elements.password.value });
     auth.elements.password.value = '';
     run(async () => {
-      await login; auth.hidden = true;
+      await login;
       const action = pendingAction; pendingAction = null;
+      dialog.close();
       if (action) await action();
     });
   });
-  find('auth-cancel').onclick = () => { pendingAction = null; auth.hidden = true; auth.elements.password.value = ''; };
+  dialog.querySelector('[data-auth-cancel]').onclick = () => dialog.close();
+  dialog.addEventListener('close', () => { pendingAction = null; auth.elements.password.value = ''; });
   find('refresh').onclick = () => run(async () => { editor.hidden = true; locationRequest++; await refresh(); });
-  find('lock').onclick = () => run(async () => {
+  adminButton.onclick = () => {
+    if (!isAdmin) { promptAdmin(null); return; }
+    return run(async () => {
     await adminRequest('logout', {}); editing = null; pendingAction = null; locationRequest++;
-    editor.reset(); editor.hidden = true; auth.hidden = true; auth.elements.password.value = '';
-  });
+      editor.reset(); editor.hidden = true; dialog.close(); auth.elements.password.value = '';
+    });
+  };
   find('edit').onclick = () => authorized(() => {
     editing = current;
     for (const name of ['name', 'location_label', 'latitude', 'longitude', 'altitude_m', 'notes']) {
