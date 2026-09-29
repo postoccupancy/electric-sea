@@ -10,6 +10,7 @@ const { execSync } = require('child_process');
 const { PcmAnalyzer } = require('./audio-analysis');
 const { decodeImaAdpcm } = require('./ima-adpcm');
 const { SerialBatchPacer } = require('./serial-batch-pacer');
+const { createArchive } = require('./weather-brain-archive');
 const { page: modulationSpectrumPage } = require('./modulation-spectrum-demo-v3');
 
 // ─── SSL ─────────────────────────────────────────────────────────────────────
@@ -148,6 +149,7 @@ app.get('/electric-sky/camera.jpg', (req, res) => fetchElectric('/camera.jpg', r
 app.get('/electric-sky/restart', (req, res) => fetchElectric('/restart', res));
 
 require('dotenv').config();
+const weatherBrainArchive = createArchive();
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -344,6 +346,7 @@ function broadcast(data) {
     sendBrowserMessage(client, json);
   });
   broadcastOSC(data);
+  weatherBrainArchive.observe(data);
 }
 
 function broadcastSignalBatch(signals) {
@@ -352,6 +355,7 @@ function broadcastSignalBatch(signals) {
     sendBrowserMessage(client, json, true);
   });
   for (const signal of signals) broadcastOSC(signal);
+  weatherBrainArchive.observe({ type: 'signal_batch', signals });
 }
 
 function broadcastSampleBatch(batch, oscPacket) {
@@ -361,6 +365,7 @@ function broadcastSampleBatch(batch, oscPacket) {
   });
   if (oscReceiveClients.size > 0) sendOSCPacketToClients(oscPacket);
   try { scSocket.send(oscPacket, 57110, '127.0.0.1'); } catch (e) {}
+  weatherBrainArchive.observe(batch);
 }
 
 function decodeScalarBatch(messages, senderIp) {

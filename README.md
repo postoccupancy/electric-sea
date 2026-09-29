@@ -10,6 +10,9 @@ Demo sites:
 - Browser Mic: [https://rf.postoccupancy.com/mic](https://rf.postoccupancy.com/mic)
 - Shared Signal Visualizer: open any signal's VIEW link from the router dashboard
 
+Optional [Weather Brain archival forwarding](router/ARCHIVAL.md) stores one-second
+scalar statistics through the existing HTTP API while preserving live routing.
+
 ---
 
 ## What it does
