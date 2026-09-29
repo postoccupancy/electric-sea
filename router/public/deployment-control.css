@@ -1,0 +1,12 @@
+#wb-deployment{margin:12px;border:1px solid #26313a;background:#0c1015;color:#dce6ee;padding:12px;font:12px monospace}
+#wb-deployment h2{font-size:12px;font-weight:normal;color:#8ba0af;text-transform:uppercase;letter-spacing:.1em;margin:0 0 8px}
+#wb-deployment p{margin:5px 0;white-space:pre-wrap}
+#wb-deployment button{background:#17212a;color:#adf;border:1px solid #33424e;padding:5px 9px;font:inherit;cursor:pointer;margin:5px 6px 0 0}
+#wb-deployment button:disabled{opacity:.5;cursor:wait}
+#wb-deployment input,#wb-deployment textarea{background:#080a0d;color:inherit;border:1px solid #33424e;padding:6px;font:inherit;width:100%;box-sizing:border-box}
+#wb-deployment label{display:block;margin:8px 0;color:#8ba0af}
+#wb-deployment form{max-width:520px}
+#wb-deployment .wb-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+#wb-deployment .wb-message{color:#ffcc66}
+#wb-deployment .wb-hint{color:#8ba0af;font-size:11px}
+#wb-deployment [hidden]{display:none!important}

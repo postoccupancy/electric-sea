@@ -1,5 +1,26 @@
 # Weather Brain archival forwarding
 
+## Deployment controls
+
+Both router-served node dashboards now include Start/Change/End deployment
+controls. Weather Brain remains the sole owner of deployment state. Configure
+`WEATHER_BRAIN_STATUS_TOKEN` with Weather Brain's existing `STATUS_TOKEN`, in
+addition to the archive URL/ingest token below, and restart both APIs after
+installing the deployment-management changes.
+
+The operator enters the status token in the dashboard; it stays in page memory.
+The same-origin `/api/deployments/:node` proxy validates it and keeps the ingest
+credential server-side. Holders of this configured status token can manage
+deployments for electric-sky and indoor-sky through the proxy. Public page access
+alone is insufficient. The Pi never caches or owns deployment state.
+
+Use current location requests browser coordinates once; edit or clear them to
+match the sensor. Change closes the old deployment and opens a new one atomically;
+history and existing bucket associations remain intact. Historical NULL records
+require Weather Brain's explicit dry-run/`--apply` backfill command.
+
+## Archival configuration
+
 The router optionally archives normalized numeric OSC scalar streams. Live sends
 run first and are unchanged. The archive observes sample batches, signal batches
 (including derived bass/mid/high/centroid features), and individual OSC signals.

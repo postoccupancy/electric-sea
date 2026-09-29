@@ -11,6 +11,7 @@ const { PcmAnalyzer } = require('./audio-analysis');
 const { decodeImaAdpcm } = require('./ima-adpcm');
 const { SerialBatchPacer } = require('./serial-batch-pacer');
 const { createArchive } = require('./weather-brain-archive');
+const { injectDeploymentControl, installDeploymentProxy } = require('./deployment-controls');
 const { page: modulationSpectrumPage } = require('./modulation-spectrum-demo-v3');
 
 // ─── SSL ─────────────────────────────────────────────────────────────────────
@@ -89,13 +90,13 @@ function refreshIndoorDashboard(callback = () => {}) {
 app.get(/^\/indoor-sky$/, (req, res) => res.redirect(308, '/indoor-sky/'));
 app.get('/indoor-sky/', (req, res) => {
   if (fs.existsSync(INDOOR_DASHBOARD_CACHE)) {
-    res.type('text/html').send(fs.readFileSync(INDOOR_DASHBOARD_CACHE));
+    res.type('text/html').send(injectDeploymentControl(fs.readFileSync(INDOOR_DASHBOARD_CACHE, 'utf8'), 'indoor-sky'));
     refreshIndoorDashboard(error => { if (error) console.warn(`Indoor dashboard refresh: ${error.message}`); });
     return;
   }
   refreshIndoorDashboard((error, html) => error
     ? res.status(502).type('text/plain').send(`indoor-sky dashboard unavailable: ${error.message}`)
-    : res.type('text/html').send(html));
+    : res.type('text/html').send(injectDeploymentControl(html, 'indoor-sky')));
 });
 app.get('/indoor-sky/status', (req, res) => {
   if (indoorUsbStatus && Date.now() - indoorUsbStatusAt < 5000) return res.json(indoorUsbStatus);
@@ -143,13 +144,14 @@ function transformElectricDashboard(html) {
 }
 
 app.get(/^\/electric-sky$/, (req, res) => res.redirect(308, '/electric-sky/'));
-app.get('/electric-sky/', (req, res) => fetchElectric('/', res, transformElectricDashboard));
+app.get('/electric-sky/', (req, res) => fetchElectric('/', res, html => injectDeploymentControl(transformElectricDashboard(html), 'electric-sky')));
 app.get('/electric-sky/status', (req, res) => fetchElectric('/status', res));
 app.get('/electric-sky/camera.jpg', (req, res) => fetchElectric('/camera.jpg', res));
 app.get('/electric-sky/restart', (req, res) => fetchElectric('/restart', res));
 
 require('dotenv').config();
 const weatherBrainArchive = createArchive();
+installDeploymentProxy(app);
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
