@@ -1,4 +1,3 @@
-const { createHash, timingSafeEqual } = require('node:crypto');
 
 function injectDeploymentControl(html, node) {
   if (!['electric-sky', 'indoor-sky'].includes(node) || html.includes('id="wb-deployment"')) return html;
@@ -9,7 +8,7 @@ function injectDeploymentControl(html, node) {
     .replace(/<\/body>/i, '<script src="/deployment-control.js" defer></script></body>');
 }
 
-function installDeploymentProxy(app, env = process.env, transport = fetch) {
+function installDeploymentProxy(app, requireAdmin, env = process.env, transport = fetch) {
   async function proxy(req, res) {
     res.set('Cache-Control', 'no-store');
     const node = req.params.node;
@@ -19,13 +18,8 @@ function installDeploymentProxy(app, env = process.env, transport = fetch) {
       return res.status(404).json({ detail: 'Unknown deployment operation' });
     }
     const expected = env.WEATHER_BRAIN_STATUS_TOKEN;
-    const supplied = req.get('X-Status-Token') || '';
     if (!expected || !env.WEATHER_BRAIN_URL || (action && !env.WEATHER_BRAIN_INGEST_TOKEN)) {
       return res.status(503).json({ detail: 'Deployment management is not configured' });
-    }
-    const digest = value => createHash('sha256').update(value).digest();
-    if (!supplied || !timingSafeEqual(digest(expected), digest(supplied))) {
-      return res.status(401).json({ detail: 'Status token required' });
     }
     // The proxy never enables cross-origin browser access or stores deployment state.
     if (req.get('Origin')) {
@@ -42,15 +36,22 @@ function installDeploymentProxy(app, env = process.env, transport = fetch) {
       const upstream = await transport(url, {
         method: action ? 'POST' : 'GET', redirect: 'error', signal: AbortSignal.timeout(5000),
         headers: action ? { 'Content-Type': 'application/json', 'X-Ingest-Token': env.WEATHER_BRAIN_INGEST_TOKEN } :
-          { 'X-Status-Token': supplied },
+          { 'X-Status-Token': expected },
         ...(action && { body: JSON.stringify(req.body) })
       });
       const data = await upstream.json();
+      // Never relay arbitrary upstream error bodies (which may echo request headers).
+      if (!upstream.ok) return res.status(upstream.status).json({ detail:
+        upstream.status === 409 ? 'Deployment changed; refresh before retrying' : 'Weather Brain rejected the deployment request' });
+      const serialized = JSON.stringify(data);
+      if ([env.WEATHER_BRAIN_STATUS_TOKEN, env.WEATHER_BRAIN_INGEST_TOKEN].some(secret => secret && serialized.includes(JSON.stringify(secret).slice(1, -1)))) {
+        throw new Error('Credential in upstream response');
+      }
       res.status(upstream.status).json(data);
     } catch { res.status(502).json({ detail: 'Weather Brain deployment API unavailable' }); }
   }
   app.get('/api/deployments/:node', proxy);
-  app.post('/api/deployments/:node/:action', proxy);
+  app.post('/api/deployments/:node/:action', requireAdmin, proxy);
 }
 
 module.exports = { injectDeploymentControl, installDeploymentProxy };

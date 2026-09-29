@@ -3,14 +3,14 @@
   if (!root || !['electric-sky', 'indoor-sky'].includes(root.dataset.node)) return;
   root.innerHTML = `
     <h2>Deployment</h2>
-    <form data-auth><label>Weather Brain status token
-      <input name="token" type="password" autocomplete="off" required></label>
-      <button>Connect</button><p class="wb-hint">Kept only in this page until disconnect or reload.</p></form>
-    <div data-state hidden><p data-name></p><p data-location></p><p data-since></p>
+    <form data-auth hidden><label>Unlock administrator
+      <input name="password" type="password" autocomplete="off" required></label>
+      <button>Unlock</button><button type="button" data-auth-cancel>Cancel</button></form>
+    <div data-state><p data-name>Loading deployment...</p><p data-location></p><p data-since></p>
       <button type="button" data-edit>Start deployment</button>
       <button type="button" data-end hidden>End</button>
       <button type="button" data-refresh>Refresh</button>
-      <button type="button" data-disconnect>Disconnect</button></div>
+      <button type="button" data-lock hidden>Lock admin</button></div>
     <form data-editor hidden>
       <label>Deployment name<input name="name" required maxlength="255"></label>
       <label>Location label<input name="location_label" maxlength="500"></label>
@@ -27,13 +27,13 @@
     <p data-message class="wb-message" role="status" aria-live="polite"></p>`;
   const find = name => root.querySelector(`[data-${name}]`);
   const auth = find('auth'), editor = find('editor');
-  let token = '', current = null, editing = null;
+  let current = null, editing = null, pendingAction = null;
   let locationRequest = 0;
   const message = text => { find('message').textContent = text; };
   async function request(action, body) {
     const response = await fetch(`/api/deployments/${root.dataset.node}${action ? '/' + action : ''}`, {
       method: action ? 'POST' : 'GET', cache: 'no-store',
-      headers: { 'X-Status-Token': token, ...(action && { 'Content-Type': 'application/json' }) },
+      headers: { ...(action && { 'Content-Type': 'application/json', 'X-Electric-Sea-Admin': '1' }) },
       ...(action && { body: JSON.stringify(body) })
     });
     const data = await response.json();
@@ -45,12 +45,11 @@
     return data;
   }
   function render() {
-    auth.hidden = true;
     find('state').hidden = false;
     find('name').textContent = current?.name || 'No active deployment';
     find('location').textContent = current?.location_label || '';
     find('since').textContent = current ? `Since ${new Date(current.started_at).toLocaleString()}` : '';
-    find('edit').textContent = current ? 'Change' : 'Start deployment';
+    find('edit').textContent = current ? 'Edit deployment' : 'Start deployment';
     find('end').hidden = !current;
   }
   async function refresh() { current = (await request()).deployment; render(); }
@@ -60,28 +59,56 @@
     try { await action(); }
     catch (error) {
       message(error.message);
+      if (error.status === 401) promptAdmin(action);
       if (error.status === 409) {
         editor.hidden = true; locationRequest++;
         try { await refresh(); } catch { /* Retain the original conflict explanation. */ }
       }
     } finally { root.querySelectorAll('button').forEach(button => { button.disabled = false; }); }
   }
+  async function adminRequest(path, body) {
+    const response = await fetch('/api/admin/' + path, {
+      method: body === undefined ? 'GET' : 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Electric-Sea-Admin': '1' },
+      ...(body !== undefined && { body: JSON.stringify(body) })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Admin request failed');
+    find('lock').hidden = !data.authenticated;
+    return data;
+  }
+  function promptAdmin(action) {
+    pendingAction = action; auth.hidden = false; auth.elements.password.focus();
+  }
+  function authorized(action) {
+    return run(async () => {
+      if ((await adminRequest('status')).authenticated) await action();
+      else promptAdmin(action);
+    });
+  }
   auth.addEventListener('submit', event => {
-    event.preventDefault(); token = auth.elements.token.value; auth.elements.token.value = '';
-    run(refresh);
+    event.preventDefault();
+    const login = adminRequest('login', { password: auth.elements.password.value });
+    auth.elements.password.value = '';
+    run(async () => {
+      await login; auth.hidden = true;
+      const action = pendingAction; pendingAction = null;
+      if (action) await action();
+    });
   });
+  find('auth-cancel').onclick = () => { pendingAction = null; auth.hidden = true; auth.elements.password.value = ''; };
   find('refresh').onclick = () => run(async () => { editor.hidden = true; locationRequest++; await refresh(); });
-  find('disconnect').onclick = () => {
-    token = ''; current = null; editing = null; locationRequest++;
-    editor.reset(); editor.hidden = true; find('state').hidden = true; auth.hidden = false; message('');
-  };
-  find('edit').onclick = () => {
+  find('lock').onclick = () => run(async () => {
+    await adminRequest('logout', {}); editing = null; pendingAction = null; locationRequest++;
+    editor.reset(); editor.hidden = true; auth.hidden = true; auth.elements.password.value = '';
+  });
+  find('edit').onclick = () => authorized(() => {
     editing = current;
     for (const name of ['name', 'location_label', 'latitude', 'longitude', 'altitude_m', 'notes']) {
       editor.elements[name].value = current?.[name] ?? '';
     }
     editor.hidden = false; editor.elements.name.focus();
-  };
+  });
   find('cancel').onclick = () => { editor.hidden = true; locationRequest++; message(''); };
   find('locate').onclick = () => {
     if (!navigator.geolocation) return message('Browser location is unavailable. Enter coordinates manually.');
@@ -104,17 +131,29 @@
       body[key] = editor.elements[key].value === '' ? null : Number(editor.elements[key].value);
     }
     if (editing) body.expected_deployment_id = editing.id;
-    run(async () => {
+    authorized(async () => {
       current = (await request(editing ? 'change' : 'start', body)).deployment;
       editor.hidden = true; locationRequest++; render();
     });
   });
-  find('end').onclick = () => {
+  find('end').onclick = () => authorized(async () => {
     if (!current || !window.confirm(`End deployment "${current.name}"?`)) return;
     const id = current.id;
-    run(async () => {
-      current = (await request('end', { expected_deployment_id: id })).deployment;
-      editor.hidden = true; locationRequest++; render();
+    current = (await request('end', { expected_deployment_id: id })).deployment;
+    editor.hidden = true; locationRequest++; render();
+  });
+  const restart = document.getElementById('restartDevice');
+  if (restart) restart.onclick = () => authorized(async () => {
+    if (!window.confirm(`Restart ${root.dataset.node}? Data and audio will pause briefly.`)) return;
+    const response = await fetch(`/${root.dataset.node}/restart`, {
+      method: 'POST', headers: { 'X-Electric-Sea-Admin': '1' }, cache: 'no-store'
     });
-  };
+    if (!response.ok) {
+      const error = new Error('Device restart failed'); error.status = response.status; throw error;
+    }
+    restart.disabled = true; restart.textContent = 'restarting...';
+    setTimeout(() => location.reload(), 8000);
+  });
+  run(refresh);
+  adminRequest('status').catch(() => {});
 })();

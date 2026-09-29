@@ -2,17 +2,58 @@
 
 ## Deployment controls
 
-Both router-served node dashboards now include Start/Change/End deployment
-controls. Weather Brain remains the sole owner of deployment state. Configure
-`WEATHER_BRAIN_STATUS_TOKEN` with Weather Brain's existing `STATUS_TOKEN`, in
-addition to the archive URL/ingest token below, and restart both APIs after
-installing the deployment-management changes.
+Both router-served node dashboards display current deployment state immediately
+on load, without login. Weather Brain remains the sole owner of deployment state.
+Public `GET /api/deployments/:node` uses the router's server-held status token;
+the browser never supplies or receives either Weather Brain credential.
 
-The operator enters the status token in the dashboard; it stays in page memory.
-The same-origin `/api/deployments/:node` proxy validates it and keeps the ingest
-credential server-side. Holders of this configured status token can manage
-deployments for electric-sky and indoor-sky through the proxy. Public page access
-alone is insufficient. The Pi never caches or owns deployment state.
+Set the following in the router environment or `.env`, then restart Electric Sea:
+
+```dotenv
+# Electric Sea administrator
+ELECTRIC_SEA_ADMIN_PASSWORD=YOUR_ADMIN_PASSWORD
+
+# Electric Sea -> Weather Brain
+WEATHER_BRAIN_URL=https://api.postoccupancy.com
+WEATHER_BRAIN_STATUS_TOKEN=YOUR_WEATHER_BRAIN_STATUS_TOKEN
+WEATHER_BRAIN_INGEST_TOKEN=YOUR_WEATHER_BRAIN_INGEST_TOKEN
+```
+
+The admin password authenticates the human to Electric Sea only. Weather Brain
+status/ingestion tokens authenticate Electric Sea's server-to-server reads/writes.
+They must remain server-side; do not use them as the admin password. No changes to
+Weather Brain's API or configuration are needed for this revision.
+
+Start/Edit/End and Restart device request a small admin unlock prompt when needed,
+then continue the requested action. Subsequent actions use the session cookie;
+public deployment display never depends on admin status. Lock admin logs out.
+
+`POST /api/admin/login` accepts `{ "password": "..." }`; `GET /api/admin/status`
+reports authentication; `POST /api/admin/logout` invalidates the session. Login,
+logout and administrative writes require `X-Electric-Sea-Admin: 1`; supplied Origin
+must match the router Host. No cross-origin admin access is enabled. Password
+comparison is timing-safe, and login is limited to ten attempts per minute across
+this single-administrator process. A missing admin password disables login.
+
+An opaque, cryptographically random session ID is issued in an HttpOnly,
+SameSite=Strict cookie, Secure on HTTPS, scoped to `/`, with a 30-day absolute
+lifetime. The server retains only session hashes and expirations, at most eight
+sessions; oldest sessions are evicted. Logout, expiration, password changes and
+router restart invalidate sessions. Reloads and navigation between the two node
+dashboards keep the session. Password fields are cleared after submission; no
+password or Weather Brain token is stored in browser storage or session cookies.
+
+The router already serves HTTPS, so production cookies are Secure without trusting
+forwarded headers. No Cloudflare or proxy-trust configuration changes are made.
+SameSite=Strict is intended for normal same-origin dashboard requests.
+
+Deployment POSTs use reusable `requireAdmin` middleware before forwarding with
+the server-held ingestion token. Both `POST /electric-sky/restart` and
+`POST /indoor-sky/restart` use that same middleware. Old GET restart URLs no longer
+execute a restart. The existing USB/device HTTP restart commands are unchanged.
+The Pi never caches or owns deployment state. Public deployment responses contain
+the existing deployment fields, including coordinates and notes; treat this as
+public dashboard metadata.
 
 Use current location requests browser coordinates once; edit or clear them to
 match the sensor. Change closes the old deployment and opens a new one atomically;

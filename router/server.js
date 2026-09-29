@@ -12,6 +12,9 @@ const { decodeImaAdpcm } = require('./ima-adpcm');
 const { SerialBatchPacer } = require('./serial-batch-pacer');
 const { createArchive } = require('./weather-brain-archive');
 const { injectDeploymentControl, installDeploymentProxy } = require('./deployment-controls');
+const { createAdmin } = require('./admin-session');
+require('dotenv').config();
+const admin = createAdmin();
 const { page: modulationSpectrumPage } = require('./modulation-spectrum-demo-v3');
 
 // ─── SSL ─────────────────────────────────────────────────────────────────────
@@ -41,6 +44,7 @@ const wss    = new WebSocketServer({ server });
 
 app.use(express.static('public'));
 app.use(express.json());
+admin.install(app);
 app.get('/mic.html', (req, res) => res.redirect(308, '/mic/'));
 app.get('/visualizer.html', (req, res) => res.redirect(308, `/visualizer/?${req.url.split('?')[1] || ''}`));
 app.use('/mic',   express.static('../mic'));
@@ -102,7 +106,7 @@ app.get('/indoor-sky/status', (req, res) => {
   if (indoorUsbStatus && Date.now() - indoorUsbStatusAt < 5000) return res.json(indoorUsbStatus);
   fetchIndoor('/status', res);
 });
-app.get('/indoor-sky/restart', (req, res) => {
+app.post('/indoor-sky/restart', admin.requireAdmin, (req, res) => {
   if (sendIndoorUsbCommand('INRS')) return res.type('text/plain').send('restarting over USB');
   fetchIndoor('/restart', res);
 });
@@ -147,11 +151,10 @@ app.get(/^\/electric-sky$/, (req, res) => res.redirect(308, '/electric-sky/'));
 app.get('/electric-sky/', (req, res) => fetchElectric('/', res, html => injectDeploymentControl(transformElectricDashboard(html), 'electric-sky')));
 app.get('/electric-sky/status', (req, res) => fetchElectric('/status', res));
 app.get('/electric-sky/camera.jpg', (req, res) => fetchElectric('/camera.jpg', res));
-app.get('/electric-sky/restart', (req, res) => fetchElectric('/restart', res));
+app.post('/electric-sky/restart', admin.requireAdmin, (req, res) => fetchElectric('/restart', res));
 
-require('dotenv').config();
 const weatherBrainArchive = createArchive();
-installDeploymentProxy(app);
+installDeploymentProxy(app, admin.requireAdmin);
 
 // ─── State ────────────────────────────────────────────────────────────────────
 

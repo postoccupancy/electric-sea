@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const express = require('express');
 const { injectDeploymentControl, installDeploymentProxy } = require('../deployment-controls');
+const { createAdmin } = require('../admin-session');
 
 test('both node dashboards gain one control without altering existing scripts', () => {
   const html = '<html><head></head><body><header>Sensor</header><main>Scopes</main><script>live()</script></body></html>';
@@ -22,10 +23,12 @@ test('both node dashboards gain one control without altering existing scripts', 
   assert.ok(server.includes("injectDeploymentControl(transformElectricDashboard(html), 'electric-sky')"));
 });
 
-test('proxy requires existing status token and keeps ingestion credentials server-side', async t => {
+test('public reads use server credentials; session protects writes and logout revokes access', async t => {
   const sent = [];
   const app = express(); app.use(express.json());
-  installDeploymentProxy(app, {
+  const admin = createAdmin({ ELECTRIC_SEA_ADMIN_PASSWORD: 'owner-password' });
+  admin.install(app);
+  installDeploymentProxy(app, admin.requireAdmin, {
     WEATHER_BRAIN_URL: 'http://weather-brain:8000', WEATHER_BRAIN_STATUS_TOKEN: 'operator-test',
     WEATHER_BRAIN_INGEST_TOKEN: 'ingest-secret'
   }, async (url, options) => {
@@ -37,15 +40,23 @@ test('proxy requires existing status token and keeps ingestion credentials serve
   t.after(() => { server.closeAllConnections(); server.close(); });
   const base = `http://127.0.0.1:${server.address().port}`;
   const endpoint = `${base}/api/deployments/electric-sky`;
-  assert.equal((await fetch(endpoint)).status, 401);
-  assert.equal((await fetch(endpoint, { headers: { 'X-Status-Token': 'wrong' } })).status, 401);
-  assert.equal(sent.length, 0);
-  const headers = { 'X-Status-Token': 'operator-test', 'Content-Type': 'application/json' };
-  assert.equal((await fetch(endpoint, { headers })).status, 200);
+  const publicRead = await fetch(endpoint);
+  assert.equal(publicRead.status, 200);
+  assert.equal((await publicRead.text()).includes('operator-test'), false);
+  const headers = { 'X-Electric-Sea-Admin': '1', 'Content-Type': 'application/json' };
   assert.equal(sent[0].url, 'http://weather-brain:8000/nodes/electric-sky/deployment');
   assert.equal(sent[0].options.headers['X-Status-Token'], 'operator-test');
   assert.equal(sent[0].options.headers['X-Ingest-Token'], undefined);
   const body = { name: 'Home Office', latitude: 47.6 };
+  assert.equal((await fetch(endpoint + '/start', { method: 'POST', headers, body: JSON.stringify(body) })).status, 401);
+  assert.equal((await fetch(base + '/api/admin/login', { method: 'POST', headers, body: JSON.stringify({ password: 'wrong' }) })).status, 401);
+  const login = await fetch(base + '/api/admin/login', { method: 'POST', headers, body: JSON.stringify({ password: 'owner-password' }) });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get('set-cookie');
+  assert.match(cookie, /HttpOnly/); assert.match(cookie, /SameSite=Strict/); assert.match(cookie, /Max-Age=2592000/);
+  assert.equal(cookie.includes('owner-password'), false);
+  headers.Cookie = cookie.split(';')[0];
+  assert.equal((await (await fetch(base + '/api/admin/status', { headers })).json()).authenticated, true);
   const response = await fetch(endpoint + '/start', { method: 'POST', headers, body: JSON.stringify(body) });
   assert.equal(response.status, 200);
   assert.equal(sent[1].options.headers['X-Ingest-Token'], 'ingest-secret');
@@ -55,12 +66,15 @@ test('proxy requires existing status token and keeps ingestion credentials serve
   assert.equal((await fetch(endpoint + '/delete', { method: 'POST', headers, body: '{}' })).status, 404);
   assert.equal((await fetch(`${base}/api/deployments/unknown`, { headers })).status, 404);
   assert.equal(sent.length, 2);
+  await fetch(base + '/api/admin/logout', { method: 'POST', headers, body: '{}' });
+  assert.equal((await (await fetch(base + '/api/admin/status', { headers })).json()).authenticated, false);
+  assert.equal((await fetch(endpoint + '/start', { method: 'POST', headers, body: '{}' })).status, 401);
 });
 
 test('proxy fails closed without credentials and handles upstream errors', async t => {
   const env = {};
   const app = express(); app.use(express.json());
-  installDeploymentProxy(app, env, async () => { throw new Error('private host detail'); });
+  installDeploymentProxy(app, createAdmin({}).requireAdmin, env, async () => { throw new Error('private host detail'); });
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => { server.closeAllConnections(); server.close(); });
@@ -76,20 +90,25 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
   const elements = new Map();
   const el = () => ({ hidden: false, value: '', textContent: '', disabled: false,
     addEventListener(event, handler) { this[event] = handler; }, focus() {}, reset() {} });
-  for (const name of ['auth', 'editor', 'name', 'state', 'location', 'since', 'edit', 'end', 'message', 'refresh', 'disconnect', 'cancel', 'locate']) elements.set(name, el());
+  for (const name of ['auth', 'auth-cancel', 'editor', 'name', 'state', 'location', 'since', 'edit', 'end', 'message', 'refresh', 'lock', 'cancel', 'locate']) elements.set(name, el());
   const auth = elements.get('auth'), editor = elements.get('editor');
-  auth.elements = { token: el() };
+  auth.elements = { password: el() };
   editor.elements = Object.fromEntries(['name', 'location_label', 'latitude', 'longitude', 'altitude_m', 'notes'].map(key => [key, el()]));
   const root = { dataset: { node: 'electric-sky' }, innerHTML: '',
     querySelector: selector => elements.get(selector.slice(6, -1)), querySelectorAll: () => [] };
-  let active = null, locateCount = 0;
+  let active = null, locateCount = 0, authenticated = false;
   const requests = [];
   const context = {
-    document: { getElementById: () => root },
+    document: { getElementById: id => id === 'wb-deployment' ? root : null },
     navigator: { geolocation: { getCurrentPosition(success) { locateCount++; success({ coords: { latitude: 1, longitude: 2, altitude: null } }); } } },
     window: { confirm: () => true },
     fetch: async (url, options) => {
       const body = options.body && JSON.parse(options.body);
+      if (url.startsWith('/api/admin/')) {
+        if (url.endsWith('/login')) { assert.equal(body.password, 'owner-password'); authenticated = true; }
+        if (url.endsWith('/logout')) authenticated = false;
+        return { ok: true, json: async () => ({ authenticated }) };
+      }
       requests.push({ url, options, body });
       if (url.endsWith('/start')) active = { ...body, id: 'first', started_at: '2026-01-01T00:00:00Z' };
       if (url.endsWith('/change')) active = { ...body, id: 'second', started_at: '2026-01-02T00:00:00Z' };
@@ -99,11 +118,13 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/deployment-control.js'), 'utf8'), context);
   const settle = () => new Promise(resolve => setImmediate(resolve));
-  auth.elements.token.value = 'operator-test'; auth.submit({ preventDefault() {} }); await settle();
+  await settle();
   assert.equal(elements.get('name').textContent, 'No active deployment');
-  assert.equal(auth.elements.token.value, '');
   assert.equal(locateCount, 0);
-  elements.get('edit').onclick();
+  await elements.get('edit').onclick();
+  assert.equal(auth.hidden, false);
+  auth.elements.password.value = 'owner-password'; auth.submit({ preventDefault() {} }); await settle();
+  assert.equal(auth.elements.password.value, '');
   elements.get('locate').onclick();
   assert.equal(locateCount, 1);
   assert.equal(editor.elements.latitude.value, 1);
@@ -112,12 +133,14 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
   editor.submit({ preventDefault() {} }); await settle();
   assert.equal(requests[1].body.latitude, null);
   assert.equal(elements.get('name').textContent, '<img src=x onerror=bad()>');
-  elements.get('edit').onclick(); editor.elements.name.value = 'Studio';
+  await elements.get('edit').onclick(); editor.elements.name.value = 'Studio';
   editor.submit({ preventDefault() {} }); await settle();
   assert.equal(requests[2].body.expected_deployment_id, 'first');
   elements.get('end').onclick(); await settle();
   assert.equal(requests[3].body.expected_deployment_id, 'second');
   assert.equal(elements.get('name').textContent, 'No active deployment');
   assert.equal(locateCount, 1);
-  assert.ok(requests.every(r => !('X-Ingest-Token' in r.options.headers)));
+  assert.ok(requests.every(r => !('X-Ingest-Token' in r.options.headers) && !('X-Status-Token' in r.options.headers)));
+  await elements.get('lock').onclick();
+  assert.equal(elements.get('state').hidden, false);
 });

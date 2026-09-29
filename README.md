@@ -135,6 +135,13 @@ openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -node
 
 ### 7. Systemd services
 
+Restart the router
+```bash
+sudo systemctl restart router.service
+# check
+systemctl status router.service
+```
+
 Copy service files from `pi-setup/systemd/` to `/etc/systemd/system/`:
 
 ```bash
