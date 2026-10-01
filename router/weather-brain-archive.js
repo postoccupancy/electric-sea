@@ -63,7 +63,7 @@ class WeatherBrainArchive {
   drop(reason) { this.drops[reason] = (this.drops[reason] || 0) + 1; }
 
   // Device uptime is anchored once, preserving sample spacing across packet jitter.
-  clockTime(key, sendUs, sampleUs, receivedAt) {
+  clockTime(key, sendUs, sampleUs, receivedAt, trackDrift = false) {
     if (!Number.isFinite(sampleUs)) return null;
     if (sampleUs >= 1e15) return sampleUs / 1000; // Unix microseconds
     if (!Number.isFinite(sendUs)) return null;
@@ -80,7 +80,12 @@ class WeatherBrainArchive {
       clock = { offset: receivedAt - sendUs / 1000, lastUs: sendUs, lastSeen: receivedAt };
       this.clocks.set(key, clock);
     }
-    if (sendUs >= clock.lastUs) {
+    if (sendUs > clock.lastUs) {
+      if (trackDrift) {
+        const observedOffset = receivedAt - sendUs / 1000;
+        const correction = Math.max(-50, Math.min(50, observedOffset - clock.offset));
+        clock.offset += correction;
+      }
       clock.lastUs = sendUs;
       clock.lastSeen = receivedAt;
     }
@@ -95,7 +100,8 @@ class WeatherBrainArchive {
         for (const stream of message.streams || []) {
           const key = JSON.stringify([stream.name, message.source]);
           for (const sample of stream.samples || []) {
-            const time = this.clockTime(key, message.sendTimeUs, sample[1], receivedAt);
+            const time = this.clockTime(key, message.sendTimeUs, sample[1], receivedAt,
+              message.transport === 'usb');
             this.add(stream.name, stream.param, stream.unit, sample[2], time, receivedAt);
           }
         }

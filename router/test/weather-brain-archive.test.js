@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 const { WeatherBrainArchive, createArchive, postBatch } = require('../weather-brain-archive');
 
 const epoch = Date.parse('2026-09-28T12:00:00Z');
@@ -40,6 +42,26 @@ test('sensor clock retains boundary placement despite packet arrival jitter', as
   assert.deepEqual(rows.map(r => [r.bucket_start, r.sample_count, r.mean]), [
     ['2026-09-28T12:00:00.000Z', 2, 2], ['2026-09-28T12:00:01.000Z', 1, 9]
   ]);
+});
+
+test('USB clock follows gradual device drift without dropping the stream', async () => {
+  const f = fixture();
+  for (let packet = 0; packet < 100; packet++) {
+    f.time(packet * 100);
+    const sendTimeUs = 1_000_000 + packet * 101_000;
+    f.archive.observe(sampleBatch([[packet, sendTimeUs, packet]], {
+      transport: 'usb', sendTimeUs
+    }));
+  }
+  f.time(20000); await f.archive.tick();
+  assert.equal(f.logs.some(line => line.includes('late/future sample')), false);
+  assert.equal(f.sent[0].buckets.reduce((count, row) => count + row.sample_count, 0), 100);
+});
+
+test('Indoor USB is archived before presentation pacing and not archived twice', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /weatherBrainArchive\.observe\(batch\);\s*indoorSerialPacer\.push\(batch\)/);
+  assert.match(source, /broadcastSampleBatch\(batch, buildScalarBatchOsc\(batch\), false\)/);
 });
 
 test('ten-second transport batches retain individual seconds, nodes and features', async () => {

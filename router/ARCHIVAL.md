@@ -98,12 +98,17 @@ seconds are omitted, and single-sample standard deviation is zero. These are
 sufficient statistics for Weather Brain's weighted mean and pooled population
 variance. Received repeated observations count again; this is not packet deduplication.
 
-Sample batches use each `[sequence, timeUs, value]` timestamp. The existing
+Sample batches use each `[sequence, timeUs, value]` timestamp. Indoor USB batches
+are observed for archival immediately on arrival, before the separate dashboard
+presentation pacer. The existing
 firmware uses microseconds since boot, not UTC. The first packet's `sendTimeUs`
 is anchored to router wall time per node/source; subsequent samples retain that
-fixed offset so network jitter does not retimestamp them. Wall-clock accuracy
-is limited by initial transport/pacer delay and sensor clock drift. Keep the Pi
-clock synchronized. Unix microsecond timestamps, when present, are used directly.
+mapping so sample spacing is preserved. Indoor USB clock drift is corrected by
+at most 50 milliseconds per packet against its local arrival time; this prevents
+long-running device drift from exceeding the lateness gate without allowing
+dashboard pacing or an isolated arrival delay to abruptly retimestamp a stream.
+Wall-clock accuracy is limited by initial transport delay and clock correction.
+Keep the Pi clock synchronized. Unix microsecond timestamps, when present, are used directly.
 Individual OSC/derived signals currently have no timestamp and use observation
 time; a supplied `timeUs` is respected with the same clock convention.
 

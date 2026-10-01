@@ -163,7 +163,7 @@ const sourceNames = new Map();
 const audioCapabilities = new Map();
 let lastIndoorUsbScalarAt = 0;
 const indoorSerialPacer = new SerialBatchPacer(batch =>
-  broadcastSampleBatch(batch, buildScalarBatchOsc(batch)));
+  broadcastSampleBatch(batch, buildScalarBatchOsc(batch), false));
 
 // ─── OSC encoding helpers ─────────────────────────────────────────────────────
 
@@ -363,14 +363,14 @@ function broadcastSignalBatch(signals) {
   weatherBrainArchive.observe({ type: 'signal_batch', signals });
 }
 
-function broadcastSampleBatch(batch, oscPacket) {
+function broadcastSampleBatch(batch, oscPacket, archive = true) {
   const json = JSON.stringify(batch);
   wss.clients.forEach(client => {
     sendBrowserMessage(client, json, true);
   });
   if (oscReceiveClients.size > 0) sendOSCPacketToClients(oscPacket);
   try { scSocket.send(oscPacket, 57110, '127.0.0.1'); } catch (e) {}
-  weatherBrainArchive.observe(batch);
+  if (archive) weatherBrainArchive.observe(batch);
 }
 
 function decodeScalarBatch(messages, senderIp) {
@@ -751,6 +751,8 @@ function handleIndoorScalarPacket(packet, source) {
   lastIndoorUsbScalarAt = Date.now();
   registerSource(source, 'indoor-sky');
   const batch = { type: 'sample_batch', transport: 'usb', source, packetSequence, sendTimeUs, streams: populated };
+  // Archive at device arrival; the serial pacer is only for presentation timing.
+  weatherBrainArchive.observe(batch);
   indoorSerialPacer.push(batch);
   if (audioCount) registerAudioCapability(source, 'indoor-sky');
 }
