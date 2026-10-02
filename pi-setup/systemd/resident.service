@@ -6,7 +6,7 @@ Requires=router.service
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/signal-router/router
+WorkingDirectory=/home/pi/electric-sea/router
 ExecStart=/usr/bin/node resident-live-controls.js
 Restart=always
 RestartSec=5
