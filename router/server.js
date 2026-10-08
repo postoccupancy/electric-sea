@@ -103,7 +103,9 @@ app.get('/indoor-sky/', (req, res) => {
     : res.type('text/html').send(injectDeploymentControl(html, 'indoor-sky')));
 });
 app.get('/indoor-sky/status', (req, res) => {
-  if (indoorUsbStatus && Date.now() - indoorUsbStatusAt < 5000) return res.json(indoorUsbStatus);
+  if (indoorUsbStatus && Date.now() - indoorUsbStatusAt < 5000) {
+    return res.json({ ...indoorUsbStatus, usb_router: indoorUsbBoundaryStatus() });
+  }
   fetchIndoor('/status', res);
 });
 app.post('/indoor-sky/restart', admin.requireAdmin, (req, res) => {
@@ -123,8 +125,14 @@ function fetchElectric(path, res, transform) {
     });
   });
   request.on('timeout', () => request.destroy(new Error('electric-sky timeout')));
-  request.on('error', error => res.status(502).type('text/plain')
-    .send(`electric-sky unavailable: ${error.message}`));
+  request.on('error', error => {
+    const now = Date.now();
+    if (!fetchElectric.lastWarning || now - fetchElectric.lastWarning >= 30000) {
+      fetchElectric.lastWarning = now;
+      console.warn(`Electric Sky proxy ${path}: ${error.code || 'error'} ${error.message}`);
+    }
+    res.status(502).type('text/plain').send(`electric-sky unavailable: ${error.message}`);
+  });
 }
 
 function transformElectricDashboard(html) {
@@ -162,8 +170,20 @@ const state = { distance: 0, rate: 0 };
 const sourceNames = new Map();
 const audioCapabilities = new Map();
 let lastIndoorUsbScalarAt = 0;
+let indoorUsbLastPacketSequence = null;
+let indoorUsbPacketGapEvents = 0;
+let indoorUsbPacketsMissing = 0;
 const indoorSerialPacer = new SerialBatchPacer(batch =>
   broadcastSampleBatch(batch, buildScalarBatchOsc(batch), false));
+
+function indoorUsbBoundaryStatus() {
+  return {
+    packet_gap_events: indoorUsbPacketGapEvents,
+    packets_missing: indoorUsbPacketsMissing,
+    last_packet_sequence: indoorUsbLastPacketSequence,
+    pacer: indoorSerialPacer.status()
+  };
+}
 
 // ─── OSC encoding helpers ─────────────────────────────────────────────────────
 
@@ -748,6 +768,14 @@ function handleIndoorScalarPacket(packet, source) {
   }
   const populated = streams.filter(stream => stream.samples.length);
   if (!populated.length) return;
+  if (indoorUsbLastPacketSequence !== null) {
+    const delta = (packetSequence - indoorUsbLastPacketSequence) >>> 0;
+    if (delta > 1 && delta < 0x80000000) {
+      indoorUsbPacketGapEvents++;
+      indoorUsbPacketsMissing += delta - 1;
+    }
+  }
+  indoorUsbLastPacketSequence = packetSequence;
   lastIndoorUsbScalarAt = Date.now();
   registerSource(source, 'indoor-sky');
   const batch = { type: 'sample_batch', transport: 'usb', source, packetSequence, sendTimeUs, streams: populated };
@@ -803,22 +831,19 @@ function consumePcmBytes(pending, chunk, source) {
 
 let pcmUsbStream = null;
 let pcmUsbPending = Buffer.alloc(0);
-let pendingPcmUsbCommand = null;
 let indoorUsbStatus = null;
 let indoorUsbStatusAt = 0;
 
 function sendIndoorUsbCommand(command) {
   if (!fs.existsSync(PCM_USB_DEVICE) || Buffer.byteLength(command) !== 4) return false;
-  if (pcmUsbStream) {
-    pendingPcmUsbCommand = command;
-    pcmUsbStream.destroy();
-    return true;
-  }
   try {
-    const descriptor = fs.openSync(PCM_USB_DEVICE, 'w');
-    fs.writeSync(descriptor, command);
-    fs.closeSync(descriptor);
-    setTimeout(openPcmUsb, 100);
+    if (pcmUsbStream && Number.isInteger(pcmUsbStream.fd)) {
+      fs.writeSync(pcmUsbStream.fd, command);
+      return true;
+    }
+    const descriptor = fs.openSync(PCM_USB_DEVICE, 'r+');
+    try { fs.writeSync(descriptor, command); }
+    finally { fs.closeSync(descriptor); }
     return true;
   } catch (error) {
     console.warn(`Indoor USB command: ${error.message}`);
@@ -888,7 +913,8 @@ function openPcmUsb() {
   if (pcmUsbStream || !fs.existsSync(PCM_USB_DEVICE)) return;
   try {
     execSync(`stty -F '${PCM_USB_DEVICE}' 921600 raw -echo`);
-    pcmUsbStream = fs.createReadStream(PCM_USB_DEVICE);
+    const descriptor = fs.openSync(PCM_USB_DEVICE, 'r+');
+    pcmUsbStream = fs.createReadStream(null, { fd: descriptor, autoClose: true });
     pcmUsbStream.on('data', chunk => {
       pcmUsbPending = consumeUsbBytes(pcmUsbPending, chunk, '192.168.0.32');
     });
@@ -896,9 +922,6 @@ function openPcmUsb() {
     pcmUsbStream.on('close', () => {
       pcmUsbStream = null;
       pcmUsbPending = Buffer.alloc(0);
-      const command = pendingPcmUsbCommand;
-      pendingPcmUsbCommand = null;
-      if (command) sendIndoorUsbCommand(command);
     });
     console.log(`PCM USB listening on ${PCM_USB_DEVICE}`);
   } catch (error) {

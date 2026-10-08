@@ -44,18 +44,27 @@ test('sensor clock retains boundary placement despite packet arrival jitter', as
   ]);
 });
 
-test('USB clock follows gradual device drift without dropping the stream', async () => {
-  const f = fixture();
-  for (let packet = 0; packet < 100; packet++) {
-    f.time(packet * 100);
-    const sendTimeUs = 1_000_000 + packet * 101_000;
-    f.archive.observe(sampleBatch([[packet, sendTimeUs, packet]], {
-      transport: 'usb', sendTimeUs
-    }));
+test('sample-batch clocks follow gradual device drift on USB and OSC', async () => {
+  for (const transport of ['usb', undefined]) {
+    const f = fixture();
+    for (let packet = 0; packet < 100; packet++) {
+      f.time(packet * 100);
+      const sendTimeUs = 1_000_000 + packet * 130_000;
+      f.archive.observe(sampleBatch([[packet, sendTimeUs, packet]], { transport, sendTimeUs }));
+    }
+    f.time(20000); await f.archive.tick();
+    assert.equal(f.logs.some(line => line.includes('late sample') || line.includes('future sample')), false);
+    assert.equal(f.sent[0].buckets.reduce((count, row) => count + row.sample_count, 0), 100);
   }
-  f.time(20000); await f.archive.tick();
-  assert.equal(f.logs.some(line => line.includes('late/future sample')), false);
-  assert.equal(f.sent[0].buckets.reduce((count, row) => count + row.sample_count, 0), 100);
+});
+
+test('drop diagnostics identify the node and late or future direction', async () => {
+  const f = fixture();
+  f.archive.add('electric-sky', 'temperature', 'celsius', 20, epoch - 5000, epoch);
+  f.archive.add('indoor-sky', 'temperature', 'celsius', 20, epoch + 5000, epoch);
+  await f.archive.tick();
+  assert.ok(f.logs.includes('[archive] dropped 1 node=electric-sky: late sample'));
+  assert.ok(f.logs.includes('[archive] dropped 1 node=indoor-sky: future sample'));
 });
 
 test('Indoor USB is archived before presentation pacing and not archived twice', () => {

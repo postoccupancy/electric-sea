@@ -60,7 +60,10 @@ class WeatherBrainArchive {
     this.drops = {};
   }
 
-  drop(reason) { this.drops[reason] = (this.drops[reason] || 0) + 1; }
+  drop(reason, node = 'unknown') {
+    const key = JSON.stringify([node, reason]);
+    this.drops[key] = (this.drops[key] || 0) + 1;
+  }
 
   // Device uptime is anchored once, preserving sample spacing across packet jitter.
   clockTime(key, sendUs, sampleUs, receivedAt, trackDrift = false) {
@@ -77,14 +80,27 @@ class WeatherBrainArchive {
       if (!this.clocks.has(key) && this.clocks.size >= this.maxClocks) {
         this.drop('clock capacity'); return null;
       }
-      clock = { offset: receivedAt - sendUs / 1000, lastUs: sendUs, lastSeen: receivedAt };
+      clock = { offset: receivedAt - sendUs / 1000, lastUs: sendUs, lastSeen: receivedAt,
+        driftDirection: 0, driftSamples: 0 };
       this.clocks.set(key, clock);
     }
     if (sendUs > clock.lastUs) {
       if (trackDrift) {
         const observedOffset = receivedAt - sendUs / 1000;
-        const correction = Math.max(-50, Math.min(50, observedOffset - clock.offset));
-        clock.offset += correction;
+        const error = observedOffset - clock.offset;
+        const direction = Math.abs(error) >= 250 ? Math.sign(error) : 0;
+        if (!direction) {
+          clock.driftDirection = 0;
+          clock.driftSamples = 0;
+        } else if (direction === clock.driftDirection) {
+          clock.driftSamples++;
+        } else {
+          clock.driftDirection = direction;
+          clock.driftSamples = 1;
+        }
+        if (clock.driftSamples >= 3) {
+          clock.offset += Math.max(-50, Math.min(50, error));
+        }
       }
       clock.lastUs = sendUs;
       clock.lastSeen = receivedAt;
@@ -100,8 +116,7 @@ class WeatherBrainArchive {
         for (const stream of message.streams || []) {
           const key = JSON.stringify([stream.name, message.source]);
           for (const sample of stream.samples || []) {
-            const time = this.clockTime(key, message.sendTimeUs, sample[1], receivedAt,
-              message.transport === 'usb');
+            const time = this.clockTime(key, message.sendTimeUs, sample[1], receivedAt, true);
             this.add(stream.name, stream.param, stream.unit, sample[2], time, receivedAt);
           }
         }
@@ -125,25 +140,26 @@ class WeatherBrainArchive {
         (unit != null && (typeof unit !== 'string' || unit.length > 80))) return;
     const start = Math.floor(time / 1000) * 1000;
     const cutoff = Math.max(this.closedBefore, Math.floor((now - this.lateMs) / 1000) * 1000);
-    if (start < cutoff || time > now + this.lateMs) { this.drop('late/future sample'); return; }
+    if (start < cutoff) { this.drop('late sample', node); return; }
+    if (time > now + this.lateMs) { this.drop('future sample', node); return; }
     const key = JSON.stringify([node, signal, start]);
     let bucket = this.active.get(key);
     unit = unit || null;
-    if (bucket && bucket.unit !== unit) { this.drop('unit conflict'); return; }
+    if (bucket && bucket.unit !== unit) { this.drop('unit conflict', node); return; }
     if (!bucket) {
       if (this.active.size + this.queue.length >= this.maxRecords) {
-        this.drop('queue full'); return;
+        this.drop('queue full', node); return;
       }
       bucket = { node, signal_id: signal, unit, start, mean: 0, m2: 0,
         min: value, max: value, sample_count: 0 };
       this.active.set(key, bucket);
     }
-    if (bucket.sample_count >= 100000) { this.drop('sample count limit'); return; }
+    if (bucket.sample_count >= 100000) { this.drop('sample count limit', node); return; }
     const count = bucket.sample_count + 1;
     const delta = value - bucket.mean;
     const mean = bucket.mean + delta / count;
     const m2 = bucket.m2 + delta * (value - mean);
-    if (!Number.isFinite(mean) || !Number.isFinite(m2)) { this.drop('numeric overflow'); return; }
+    if (!Number.isFinite(mean) || !Number.isFinite(m2)) { this.drop('numeric overflow', node); return; }
     Object.assign(bucket, { mean, m2, sample_count: count,
       min: Math.min(bucket.min, value), max: Math.max(bucket.max, value) });
   }
@@ -162,8 +178,9 @@ class WeatherBrainArchive {
         stddev: Math.sqrt(Math.max(0, bucket.m2 / bucket.sample_count))
       } });
     }
-    for (const [reason, count] of Object.entries(this.drops)) {
-      this.log(`[archive] dropped ${count}: ${reason}`);
+    for (const [key, count] of Object.entries(this.drops)) {
+      const [node, reason] = JSON.parse(key);
+      this.log(`[archive] dropped ${count} node=${node}: ${reason}`);
     }
     this.drops = {};
     if (this.running || now < this.retryAt || (!this.pending && now < this.nextFlush)) return;
@@ -187,11 +204,12 @@ class WeatherBrainArchive {
         this.failures = 0;
         this.retryAt = 0;
       }
-    } catch {
+    } catch (error) {
       this.failures = Math.min(this.failures + 1, 7);
       const delay = Math.min(60000, 1000 * 2 ** (this.failures - 1));
       this.retryAt = this.now() + delay;
-      this.log(`[archive] request failed; retry in ${delay}ms`);
+      this.log(`[archive] request failed node=${this.pending?.body.node_id || 'unknown'}: ` +
+        `${error.message}; retry in ${delay}ms`);
     } finally { this.running = false; }
   }
 

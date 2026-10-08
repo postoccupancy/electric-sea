@@ -103,8 +103,10 @@ are observed for archival immediately on arrival, before the separate dashboard
 presentation pacer. The existing
 firmware uses microseconds since boot, not UTC. The first packet's `sendTimeUs`
 is anchored to router wall time per node/source; subsequent samples retain that
-mapping so sample spacing is preserved. Indoor USB clock drift is corrected by
-at most 50 milliseconds per packet against its local arrival time; this prevents
+mapping so sample spacing is preserved. Uptime-timestamped sample-batch clock
+drift is corrected for both USB and OSC by at most 50 milliseconds per packet
+against local arrival time after three consecutive packets show at least 250
+milliseconds of error in the same direction. This prevents
 long-running device drift from exceeding the lateness gate without allowing
 dashboard pacing or an isolated arrival delay to abruptly retimestamp a stream.
 Wall-clock accuracy is limited by initial transport delay and clock correction.
@@ -132,6 +134,11 @@ is bounded at 256 node/source pairs. New records are dropped when capacity is
 full, preserving frozen retries. Per-second sample count is capped at the API's
 100,000 limit. Drop counts/reasons are logged at most once per scheduler tick.
 No raw observations are retained and no disk queue is used.
+
+Drop logs identify the affected node and distinguish late from future samples.
+Archive HTTP failures identify the node and include the transport error without
+logging credentials or payloads. Electric Sky proxy failures are rate-limited to
+one diagnostic every 30 seconds and continue to use portable mDNS discovery.
 
 Only one HTTP request runs at a time, with a five-second timeout and a bounded
 response body. Failures retry the identical frozen payload after 1, 2, 4, 8, 16,
