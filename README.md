@@ -722,5 +722,9 @@ termination/state handling, LAN/Tailscale registration, timestamps and benchmark
 
 Optional full-scale CWT spectra use `/osc/<device>/<signal>/cwt/spectrum`.
 Enable `CWT_SPECTRUM_OSC_ENABLED=1` in the router environment; default is off.
-The [spectrum protocol](docs/cwt-osc.md#optional-full-scale-spectrum-schema-version-1)
+The [spectrum protocol](docs/cwt-osc.md#optional-full-scale-spectrum-schema-version-2)
 documents normalized magnitude/phase semantics, rate control and frame reassembly.
+
+Spectrum schema v2 preserves valid magnitudes even when phase is unavailable, using
+an explicit per-scale `phaseValid` flag. These are temporal energy/phase summaries;
+phase-faithful reconstruction remains separate future work.

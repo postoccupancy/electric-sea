@@ -187,7 +187,7 @@ a Pi estimate. If Pi CPU cost is C ms/frame, the current schedule consumes rough
 C/10 percent of one core. An all-stream H Hz schedule would multiply cost by N×H.
 Always-on operation makes this cost continuous rather than browser-dependent.
 
-## Optional full-scale spectrum (schema version 1)
+## Optional full-scale spectrum (schema version 2)
 
 This additive endpoint does not change either `/cwt/voice/<id>` or `/cwt/voices`.
 The resident sidecar attaches a compact spectrum to each existing analysis result;
@@ -221,21 +221,21 @@ No spectrum output timer or new UDP port is added.
 
 ```text
 /osc/<device>/<signal>/cwt/spectrum
-,isddisiii followed by fff for every scale in this packet
+,isddisiii followed by fffi for every scale in this packet
 ```
 
 | Argument (1-based, excluding address) | OSC type | Meaning |
 |---|---|---|
-| 1 | i | Schema version: 1 |
+| 1 | i | Schema version: 2 |
 | 2 | s | Opaque publication epoch UUID |
 | 3 | d | Monotonically increasing integer publication frame number within epoch |
 | 4 | d | Analysis window end `timestampUs`, same source clock as voices |
-| 5 | i | Spectrum valid/ready: 1 or 0 |
+| 5 | i | Magnitude spectrum valid/ready: 1 or 0 (independent of phase availability) |
 | 6 | s | Empty when valid; otherwise invalidation reason |
 | 7 | i | Total number of scales in the complete valid frame |
 | 8 | i | Zero-based first scale index in this packet |
-| 9 | i | Number of scale triples in this packet |
-| 10 onward | f,f,f repeated | Environmental frequency Hz, normalized RMS magnitude, circular phase radians |
+| 9 | i | Number of scale records in this packet |
+| 10 onward | f,f,f,i repeated | Environmental frequency Hz, normalized RMS magnitude, phase radians or placeholder, phaseValid (0 or 1) |
 
 Order is the CWT's existing **increasing period / decreasing frequency** order.
 The default 48 logarithmic scales have `period[i] = 20^(i/47)` seconds and
@@ -244,18 +244,40 @@ carried in every frame; consumers must not assume 48 or infer frequencies from a
 index. OSC `f` rounds scale fields to float32, consistent with the router's scalar
 sensor encoding; `d` preserves source timestamp precision and integer frame IDs.
 No pitch mapping, MIDI quantization, confidence weighting or display log scaling
-is applied to the scale triples.
+is applied to the scale records.
+
+For each record `(frequencyHz, magnitude, phase, phaseValid)`, use phase **only when
+phaseValid=1**. When phaseValid=0, the phase field is a finite zero placeholder with
+no phase meaning; frequency and magnitude remain usable. A measured phase of zero
+radians is distinguished by phaseValid=1. All phases can be unavailable while the
+magnitude spectrum remains valid (header argument 5 is still 1). Magnitude-only
+consumers may ignore both phase fields.
+
+Version 2 changes the per-scale stride from v1's three floats to three floats plus
+an int32 validity flag. The nine-field header keeps its layout and metadata meaning,
+with validity now scoped to magnitude data. Consumers must check version=2 and
+advance four arguments per scale; v1-only decoders must reject v2 rather than treat
+flags as frequencies. This endpoint now emits v2 only. Tracked voice endpoints and
+`live-cwt.scd` are unchanged. The resident sidecar's internal arrays remain triples,
+with null marking undefined circular phase; only OSC serialization changes.
+
+With the address included at index 0 (as in SuperCollider), record `i` starts at
+`msg[10 + 4*i]`: frequency, magnitude, phase and flag are at offsets 0, 1, 2 and 3.
+With an address-free JavaScript `args` array, use `args[9 + 4*i]` instead.
 
 For illustration, a complete three-scale fixture is:
 
 ```text
 /osc/indoor-sky/temperature/cwt/spectrum
-,isddisiiifffffffff
-1 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 1 527348402711 1 "" 3 0 3
-1.0 0.002 0.5   0.2236068 0.010 -1.2   0.05 0.003 2.1
+,isddisiiifffifffifffi
+2 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 1 527348402711 1 "" 3 0 3
+1.0 0.002 0.5 1   0.2236068 0.010 0.0 0   0.05 0.0 0.0 0
 ```
 
-The production 48-scale temperature frame is **856 bytes**. Packets are limited to
+Here the second and third scales have unavailable phase; the third scale also has
+zero magnitude. All three frequency/magnitude pairs are valid.
+
+The production 48-scale temperature frame is **1096 bytes**. Packets are limited to
 1200 bytes (UDP payload), leaving room for normal LAN/Tailscale overhead. Larger
 spectra or longer stream addresses are split into consecutive ranges. All chunks
 share version, address, epoch, frame number, timestamp, validity and total count.
@@ -264,7 +286,7 @@ A path whose header alone cannot fit the budget cannot be published.
 Reassembly procedure:
 
 1. Key pending frames by `(OSC address, epoch, frame number)`.
-2. Check metadata agrees; place each triple at `offset + localIndex` and verify
+2. Check metadata agrees; place each four-field record at `offset + localIndex` and verify
    the range is within `0..totalCount-1`. Identical duplicate chunks are harmless;
    reject conflicting duplicates or metadata.
 3. Apply only a complete frame with every scale present. Never mix frame numbers
@@ -290,7 +312,7 @@ scaleSamples = periodSeconds * analysisSampleRate * w0 / (2*pi), w0 = 6
 ```
 
 `ResidentAnalyzer` already uses `summarizeCwt` over the last quarter of the CWT
-window, starting at `floor(sampleCount * 0.75)`. Version 1 preserves that reduction:
+window, starting at `floor(sampleCount * 0.75)`. Version 2 preserves the same temporal reduction as v1:
 
 ```text
 magnitude = sqrt(mean(power[t]))
@@ -314,21 +336,33 @@ and short-gap interpolation also remain unchanged.
 
 ### Invalidity and reset semantics
 
-No unavailable phase is filled with zero. A circular phase is considered undefined
-when power is zero or the circular resultant is at most machine epsilon times
-summed power. If **any** scale lacks phase, has a non-finite value, overflows float32,
-has invalid frequency/order, or has negative magnitude, the entire spectrum is
-sent as invalid with no triples. Voice readiness and tracker behavior are unaffected
-(e.g. a constant input can be voice-analysis-ready but spectrum-invalid).
+A circular phase is considered undefined when power is zero or the circular
+resultant is at most machine epsilon times summed power (the existing analyzer
+rule). The sidecar represents this as null. The OSC publisher independently marks
+null/undefined, non-finite numeric, or out-of-range numeric phases as unavailable.
+A phase is available only if finite and within [-pi, pi] before float32 rounding.
+Unavailable phase gets phaseValid=0 and the explicitly flagged zero placeholder;
+no NaN/Infinity is sent and no phase is synthesized. This does **not** invalidate
+frequency/magnitude data, even for a zero-magnitude scale or when every phase is
+unavailable. Changes in phase availability obey the existing rate limit, rather
+than triggering a frame-level validity transition.
+
+Frequencies must remain positive, finite, representable as positive float32 values,
+and strictly decreasing. Magnitudes must remain finite, nonnegative and finite in
+float32. Invalid frequency or magnitude data, malformed arrays (other than the
+optional phase value), and nonnumeric phase values such as strings/objects still
+invalidate the entire frame. Missing/empty scales and analysis-not-ready states
+also remain invalid. Voice readiness and tracker behavior are unaffected.
 
 Invalid packets have valid=0, total=offset=count=0 and a reason such as
-`phase-unavailable`, `invalid-scale`, `missing-scales`, `coverage`, `stale`, `idle`,
-`timestamp-discontinuity` or `analyzer-disconnected`. Example:
+`invalid-scale`, `missing-scales`, `coverage`, `stale`, `idle`,
+`timestamp-discontinuity` or `analyzer-disconnected`. `phase-unavailable` is no
+longer a frame invalidation reason in v2. Example:
 
 ```text
 /osc/indoor-sky/temperature/cwt/spectrum
 ,isddisiii
-1 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 2 527348402711 0 "phase-unavailable" 0 0 0
+2 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 2 527348402711 0 "invalid-scale" 0 0 0
 ```
 
 The sidecar gives each stream-buffer lifetime a UUID and increments an internal
@@ -341,6 +375,25 @@ A bridge disconnect emits a new invalid publication frame with the last availabl
 source timestamp; it does not fabricate a new source time. Invalid/missing source
 time uses -1 and reason `invalid-timestamp`. Source device clocks may be uptime,
 not UTC; epoch/frame identity disambiguates reset and repeated timestamps.
+
+### Future work: phase-faithful reconstruction
+
+These temporally summarized values are suitable for spectral-energy visualization
+and magnitude-driven synthesis, but not for phase-faithful reconstruction of the
+measured environmental waveform. In particular, do not extrapolate instantaneous
+phase from the approximately 15-second circular phase summaries.
+
+A separate future implementation may need:
+
+- Time-indexed complex CWT coefficients, or instantaneous complex coefficients at
+  explicitly defined analysis times.
+- A consistent phase reference and timestamp semantics.
+- Sufficient analysis cadence to track phase evolution.
+- Careful treatment of finite-window and edge effects in the CWT.
+- A defined reconstruction or resynthesis method that preserves measured phase
+  relationships.
+
+None of those capabilities are implemented by this protocol correction.
 
 ### Observe from a subscriber
 
@@ -370,7 +423,7 @@ thisProcess.removeOSCRecvFunc(~spectrumMonitor);
 ```
 
 No Pi analysis-frequency increase is made. At default scale count, the unchanged
-one-analysis-per-second round robin adds at most about 856 bytes/second of spectrum
+one-analysis-per-second round robin adds at most about 1096 bytes/second of spectrum
 payload per receiver in steady state (plus transition packets and network headers).
 A longer per-stream interval can lower this further. The extra work is 48 square
 roots/compact triples per analysis, validation and OSC encoding at publication,

@@ -16,6 +16,10 @@ function spectrumConfig(env = process.env) {
   return { enabled: enabled === '1', minIntervalMs };
 }
 
+function phaseAvailable(phase) {
+  return typeof phase === 'number' && Number.isFinite(phase) && Math.abs(phase) <= Math.PI;
+}
+
 function validateSpectrum(frame) {
   if (!Number.isFinite(frame.timestampUs)) return 'invalid-timestamp';
   if (!frame.ready) return frame.reason || 'not-ready';
@@ -25,11 +29,12 @@ function validateSpectrum(frame) {
   for (const scale of scales) {
     if (!Array.isArray(scale) || scale.length !== 3) return 'invalid-scale';
     const [frequency, magnitude, phase] = scale;
-    if (phase === null || phase === undefined) return 'phase-unavailable';
-    if (!scale.every(value => typeof value === 'number' && Number.isFinite(value)
+    // Missing/non-finite numeric phase does not invalidate spectral energy.
+    if (phase != null && typeof phase !== 'number') return 'invalid-scale';
+    if (![frequency, magnitude].every(value => typeof value === 'number' && Number.isFinite(value)
       && Number.isFinite(Math.fround(value)))) return 'invalid-scale';
     if (!(frequency > 0) || !(Math.fround(frequency) > 0) || frequency >= previousFrequency
-      || magnitude < 0 || Math.abs(phase) > Math.PI) return 'invalid-scale';
+      || magnitude < 0) return 'invalid-scale';
     previousFrequency = frequency;
   }
   return '';
@@ -74,12 +79,12 @@ class SpectrumOsc {
     state.sequence++;
     const scales = reason ? [] : source.scales;
     const address = `/${frame.device}/cwt/spectrum`;
-    const header = [1, state.epoch, state.sequence,
+    const header = [2, state.epoch, state.sequence,
       Number.isFinite(frame.timestampUs) ? frame.timestampUs : -1,
       reason ? 0 : 1, reason, scales.length, 0, 0];
     const headerBytes = buildTypedOSCMessage(address, HEADER_TYPES, header).length;
-    // Each fff triple adds 12 payload bytes and 3 type-tag bytes; allow padding.
-    const perPacket = Math.floor((MAX_PACKET_BYTES - headerBytes - 3) / 15);
+    // Each fffi record adds 16 payload bytes and 4 type-tag bytes; allow padding.
+    const perPacket = Math.floor((MAX_PACKET_BYTES - headerBytes - 3) / 20);
     if (perPacket < 1) return []; // Path too long to represent within the datagram budget.
     if (!scales.length) return [buildTypedOSCMessage(address, HEADER_TYPES, header)];
     const packets = [];
@@ -88,8 +93,13 @@ class SpectrumOsc {
       const args = [...header];
       args[7] = offset;
       args[8] = count;
-      for (let i = offset; i < offset + count; i++) args.push(...scales[i]);
-      packets.push(buildTypedOSCMessage(address, HEADER_TYPES + 'fff'.repeat(count), args));
+      for (let i = offset; i < offset + count; i++) {
+        const [frequency, magnitude, phase] = scales[i];
+        const valid = phaseAvailable(phase);
+        // The finite placeholder has no phase meaning unless the flag is 1.
+        args.push(frequency, magnitude, valid ? phase : 0, valid ? 1 : 0);
+      }
+      packets.push(buildTypedOSCMessage(address, HEADER_TYPES + 'fffi'.repeat(count), args));
     }
     return packets;
   }

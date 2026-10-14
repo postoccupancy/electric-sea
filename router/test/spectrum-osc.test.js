@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { StreamBuffer } = require('../StreamBuffer');
-const { ResidentAnalyzer, lowPassDecimate, fillMissingLinear } = require('../ResidentAnalyzer');
+const { lowPassDecimate, fillMissingLinear } = require('../ResidentAnalyzer');
 const { ResidentStreamRegistry } = require('../ResidentStreamRegistry');
 const { computeCwt, summarizeCwt } = require('../cwt');
 const { SpectrumOsc, spectrumConfig, MAX_PACKET_BYTES } = require('../spectrum-osc');
@@ -31,9 +31,10 @@ function reassemble(packets) {
     const metadata = JSON.stringify([version, timestamp, ready, reason, total]);
     if (!frames.has(key)) frames.set(key, { metadata, scales: new Map(), total });
     const result = frames.get(key);
+    assert.equal(version, 2);
     assert.equal(result.metadata, metadata);
-    assert.equal(args.length, 9 + count * 3);
-    for (let i = 0; i < count; i++) result.scales.set(offset + i, args.slice(9 + i * 3, 12 + i * 3));
+    assert.equal(args.length, 9 + count * 4);
+    for (let i = 0; i < count; i++) result.scales.set(offset + i, args.slice(9 + i * 4, 13 + i * 4));
   }
   return [...frames.values()].filter(result => result.scales.size === result.total)
     .map(result => [...result.scales].sort(([a], [b]) => a - b).map(([, scale]) => scale));
@@ -45,25 +46,28 @@ test('default spectrum fits one packet with explicit types, stable scale order a
   const packets = publisher.update(source);
   assert.equal(packets.length, 1);
   assert.ok(packets[0].length <= MAX_PACKET_BYTES);
-  assert.ok(packets[0].includes(Buffer.from(',isddisiii' + 'fff'.repeat(48))));
+  assert.ok(packets[0].includes(Buffer.from(',isddisiii' + 'fffi'.repeat(48))));
   const [{ address, args }] = decode(packets);
   assert.equal(address, '/osc/indoor-sky/temperature/cwt/spectrum');
-  assert.deepEqual([args[0], ...args.slice(2, 9)], [1, 1, source.timestampUs, 1, '', 48, 0, 48]);
+  assert.deepEqual([args[0], ...args.slice(2, 9)], [2, 1, source.timestampUs, 1, '', 48, 0, 48]);
   assert.match(args[1], /^[a-f\d-]{36}$/);
-  assert.deepEqual(reassemble(packets)[0], source.spectrum.scales.map(scale => scale.map(Math.fround)));
+  assert.deepEqual(reassemble(packets)[0], source.spectrum.scales.map(([frequency, magnitude, phase]) => [Math.fround(frequency), Math.fround(magnitude), Math.fround(phase), 1]));
 });
 
 test('larger spectra chunk below the datagram budget and reassemble without mixing frames', () => {
   let now = 0;
   const publisher = new SpectrumOsc({ enabled: true, now: () => now });
   const source = frame({ count: 256 });
+  source.spectrum.scales.forEach((scale, i) => { if (i % 3 === 0) scale[2] = null; });
   const first = publisher.update(source);
   assert.ok(first.length > 1);
   assert.ok(first.every(packet => packet.length <= MAX_PACKET_BYTES));
   now = 1000;
   const second = publisher.update(advance(source, 2));
   const mixed = [first[0], ...second.slice().reverse(), ...first.slice(1).reverse(), first[0]];
-  const expected = source.spectrum.scales.map(scale => scale.map(Math.fround));
+  const expected = source.spectrum.scales.map(([frequency, magnitude, phase]) => [
+    Math.fround(frequency), Math.fround(magnitude), phase === null ? 0 : Math.fround(phase), phase === null ? 0 : 1,
+  ]);
   assert.deepEqual(reassemble(mixed), [expected, expected]);
   assert.deepEqual(reassemble(first.slice(1)), []);
   const changedTimestamp = decode(second)[0].args[3];
@@ -89,23 +93,79 @@ test('disabled output, strict config, duplicate suppression and per-stream rate 
   assert.equal(publisher.update({ ...source, device: 'osc/indoor-sky/rms' }).length, 1);
 });
 
-test('invalid phases, non-finite coefficients, overflow, missing scales and bad ordering are explicit', () => {
-  const invalids = [null, undefined, NaN, Infinity, -Infinity, 1e100];
-  for (const value of invalids) {
+test('one, several, zero-magnitude and all unavailable phases preserve complete magnitudes', () => {
+  for (const missing of [[1], [0, 3, 47], Array.from({ length: 48 }, (_, i) => i)]) {
+    const source = frame();
+    for (const i of missing) source.spectrum.scales[i][2] = null;
+    source.spectrum.scales[missing[0]][1] = 0;
+    const packets = new SpectrumOsc({ enabled: true }).update(source);
+    const [{ args }] = decode(packets);
+    assert.deepEqual(args.slice(4, 9), [1, '', 48, 0, 48]);
+    const scales = reassemble(packets)[0];
+    assert.equal(scales.length, 48);
+    for (let i = 0; i < 48; i++) {
+      const [frequency, magnitude, phase] = source.spectrum.scales[i];
+      assert.deepEqual(scales[i], [Math.fround(frequency), Math.fround(magnitude),
+        missing.includes(i) ? 0 : Math.fround(phase), missing.includes(i) ? 0 : 1]);
+    }
+  }
+});
+
+test('unavailable numeric phases have explicit flags and finite placeholders; real zero phase stays valid', () => {
+  for (const value of [null, undefined, NaN, Infinity, -Infinity, 1e100, -4, 4]) {
     const source = frame();
     source.spectrum.scales[0][2] = value;
-    const [packet] = new SpectrumOsc({ enabled: true }).update(source);
-    const [{ args }] = decode([packet]);
+    source.spectrum.scales[1][2] = 0;
+    const packets = new SpectrumOsc({ enabled: true }).update(source);
+    const [{ args }] = decode(packets);
+    assert.equal(args[4], 1);
+    assert.equal(args[5], '');
+    assert.deepEqual(reassemble(packets)[0][0], [1, 0.125, 0, 0]);
+    assert.equal(reassemble(packets)[0][1][3], 1);
+    assert.ok(args.filter(value => typeof value === 'number').every(Number.isFinite));
+  }
+});
+
+test('invalid frequency, magnitude, structure and timestamp still invalidate frames', () => {
+  const invalids = [
+    [], [[0, 1, null]], [[-1, 1, null]], [[1, -1, null]],
+    [[1, 1, null], [2, 1, null]], [[1, 1, null], [1, 1, null]],
+    [[1, 1, '0']], [[1, 1, {}]], [[1, 1, false]], [[1, 1]], [[1, 1, null, 0]],
+    [null], [1], 'scales', null,
+  ];
+  for (const value of [undefined, null, NaN, Infinity, -Infinity, 1e100, '1', false]) {
+    invalids.push([[value, 1, null]], [[1, value, null]]);
+  }
+  invalids.push([[1e-100, 1, null]]);
+  for (const scales of invalids) {
+    const source = frame(); source.spectrum.scales = scales;
+    const [{ args }] = decode(new SpectrumOsc({ enabled: true }).update(source));
+    assert.equal(args[0], 2);
     assert.equal(args[4], 0);
     assert.ok(args[5]);
     assert.deepEqual(args.slice(6), [0, 0, 0]);
     assert.ok(args.filter(value => typeof value === 'number').every(Number.isFinite));
   }
-  for (const scales of [[], [[0, 1, 1]], [[1, -1, 0]], [[1, 1, 0], [2, 1, 0]], [[1, 1e100, 0]]]) {
-    const source = frame(); source.spectrum.scales = scales;
-    assert.equal(decode(new SpectrumOsc({ enabled: true }).update(source))[0].args[4], 0);
-  }
   assert.equal(decode(new SpectrumOsc({ enabled: true }).update(frame({ timestampUs: NaN })))[0].args[3], -1);
+});
+
+test('phase availability changes keep the epoch and obey the existing publication interval', () => {
+  let now = 0;
+  const publisher = new SpectrumOsc({ enabled: true, minIntervalMs: 5000, now: () => now });
+  const source = frame();
+  const initial = decode(publisher.update(source))[0].args;
+  const missing = advance(source, 2);
+  missing.spectrum.scales = source.spectrum.scales.map(([f, m]) => [f, m, null]);
+  now = 1000;
+  assert.deepEqual(publisher.update(missing), [], 'phase loss is not magnitude invalidation');
+  now = 5000;
+  const packets = publisher.update(advance(missing, 3));
+  const next = decode(packets)[0].args;
+  assert.equal(next[1], initial[1]);
+  assert.equal(next[2], initial[2] + 1);
+  assert.equal(next[3], initial[3]);
+  assert.equal(next[4], 1);
+  assert.ok(reassemble(packets)[0].every(scale => scale[3] === 0));
 });
 
 test('readiness transitions bypass throttling; source and router resets get distinct epochs', () => {
@@ -160,7 +220,7 @@ test('synthetic oscillations publish the existing per-scale CWT reduction, not t
     && scale.recentPower > scales[i - 1].recentPower && scale.recentPower > scales[i + 1].recentPower);
   for (const expected of [0.2, 0.7]) assert.ok(peaks.some(scale => Math.abs(scale.frequencyHz - expected) < 0.07));
   const packets = new SpectrumOsc({ enabled: true }).update(message);
-  assert.deepEqual(reassemble(packets)[0], message.spectrum.scales.map(scale => scale.map(Math.fround)));
+  assert.deepEqual(reassemble(packets)[0], message.spectrum.scales.map(([frequency, magnitude, phase]) => [Math.fround(frequency), Math.fround(magnitude), Math.fround(phase), 1]));
   assert.equal(registry.analyzeNext(), message, 'cached analysis keeps same frame identity');
   registry.remove(stream, 'idle');
   const idle = registry.analyzeNext();
@@ -170,15 +230,16 @@ test('synthetic oscillations publish the existing per-scale CWT reduction, not t
   assert.notEqual(registry.analyzeNext().spectrum.epoch, message.spectrum.epoch);
 });
 
-test('constant input marks unavailable circular phase without inventing phase zero', () => {
+test('constant input publishes all zero magnitudes with explicit unavailable phases', () => {
   const registry = new ResidentStreamRegistry();
   registry.ingestBatch('osc/test/value', Array.from({ length: 1201 }, (_, i) => [i, i * 50000, 20]));
   const message = registry.analyzeNext();
   assert.equal(message.ready, true, 'voice analysis readiness stays unchanged');
   assert.ok(message.spectrum.scales.every(([, magnitude, phase]) => magnitude === 0 && phase === null));
-  const [{ args }] = decode(new SpectrumOsc({ enabled: true }).update(message));
-  assert.equal(args[4], 0);
-  assert.equal(args[5], 'phase-unavailable');
+  const packets = new SpectrumOsc({ enabled: true }).update(message);
+  const [{ args }] = decode(packets);
+  assert.deepEqual(args.slice(4, 9), [1, '', 48, 0, 48]);
+  assert.ok(reassemble(packets)[0].every(([, magnitude, phase, valid]) => magnitude === 0 && phase === 0 && valid === 0));
 });
 
 test('spectrum metadata and publishing do not change existing voice packets', () => {
