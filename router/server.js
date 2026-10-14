@@ -208,8 +208,10 @@ const PCM_USB_DEVICE = process.env.PCM_USB_DEVICE ||
 
 const { OscClients } = require('./osc-clients');
 const { VoiceOsc } = require('./voice-osc');
+const { SpectrumOsc, spectrumConfig } = require('./spectrum-osc');
 const oscReceiveClients = new OscClients();
 const voiceOsc = new VoiceOsc();
+const spectrumOsc = new SpectrumOsc(spectrumConfig());
 setInterval(() => oscReceiveClients.expire(), 1000).unref();
 // Repeat authoritative state so dropped UDP endings are repaired without an ACK transport.
 setInterval(() => {
@@ -868,6 +870,9 @@ const residentLatest = new Map();
 function publishResidentFrame(frame) {
   if (frame.type === 'resident_voices') residentLatest.set(frame.device, frame);
   for (const packet of voiceOsc.update(frame)) sendOSCPacketToClients(packet);
+  if (oscReceiveClients.size > 0) {
+    for (const packet of spectrumOsc.update(frame)) sendOSCPacketToClients(packet);
+  }
   const message = JSON.stringify(frame);
   for (const client of wss.clients) {
     if (client.residentSubscribed) sendBrowserMessage(client, message, true);

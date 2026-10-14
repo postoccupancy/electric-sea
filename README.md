@@ -719,3 +719,8 @@ on its existing UDP port 9000. Standalone receivers register with
 `/router/subscribe 9000` on UDP 5005 and maintain a heartbeat.
 See [CWT OSC protocol and operation](docs/cwt-osc.md) for argument types,
 termination/state handling, LAN/Tailscale registration, timestamps and benchmarking.
+
+Optional full-scale CWT spectra use `/osc/<device>/<signal>/cwt/spectrum`.
+Enable `CWT_SPECTRUM_OSC_ENABLED=1` in the router environment; default is off.
+The [spectrum protocol](docs/cwt-osc.md#optional-full-scale-spectrum-schema-version-1)
+documents normalized magnitude/phase semantics, rate control and frame reassembly.

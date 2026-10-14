@@ -1,5 +1,6 @@
 'use strict';
 
+const { randomUUID } = require('node:crypto');
 const { StreamBuffer } = require('./StreamBuffer');
 const { ResidentAnalyzer } = require('./ResidentAnalyzer');
 const { VoiceTracker } = require('./VoiceTracker');
@@ -51,6 +52,7 @@ class ResidentStreamRegistry {
     const message = {
       type: 'resident_voices', device: streamId, timestampUs: entry.lastTimestampUs,
       value: entry.lastValue, ready: false, reason, coverage: 0, voices: [],
+      spectrum: { epoch: entry.epoch, frame: ++entry.frame, scales: [] },
     };
     this.latest.set(streamId, message);
     this.pending.push(message);
@@ -132,6 +134,8 @@ class ResidentStreamRegistry {
     let entry = this.streams.get(streamId);
     if (!entry) {
       entry = {
+        epoch: randomUUID(),
+        frame: 0,
         buffer: this.createBuffer(this.bufferOptions),
         analyzer: this.createAnalyzer(this.analyzerOptions),
         tracker: this.createTracker(this.trackerOptions),
@@ -183,6 +187,15 @@ class ResidentStreamRegistry {
       reason: analysis.reason,
       coverage: analysis.coverage,
       voices,
+      spectrum: {
+        epoch: entry.epoch,
+        frame: ++entry.frame,
+        // Preserve summarizeCwt's existing recent-window reduction, not tracker fields.
+        scales: analysis.ready ? (analysis.scales || []).map(scale => [
+          scale.frequencyHz, Math.sqrt(scale.recentPower),
+          scale.phaseDefined === false ? null : scale.phase,
+        ]) : [],
+      },
     };
     entry.latest = message;
     this.latest.set(streamId, message);

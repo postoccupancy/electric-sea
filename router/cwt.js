@@ -220,6 +220,8 @@ function summarizeCwt(result, { recentFraction = 0.25 } = {}) {
       backgroundPower,
       excessRatio: backgroundPower > Number.EPSILON ? meanRecentPower / backgroundPower : 0,
       phase: Math.atan2(phaseY, phaseX),
+      // atan2(0, 0) is numeric but is not a defined circular mean.
+      phaseDefined: recentPower > 0 && Math.hypot(phaseX, phaseY) > Number.EPSILON * recentPower,
       completedCycles: result.durationSeconds / periodSeconds,
     };
   });

@@ -100,6 +100,9 @@ test('sidecar analyzes with no consumers, replays state and recovers from router
   t.after(() => client.terminate());
   const [raw] = await once(client, 'message');
   assert.equal(JSON.parse(raw).ready, true);
+  assert.equal(JSON.parse(raw).spectrum.scales.length, 48);
+  assert.equal(JSON.parse(raw).spectrum.frame, live.latest.get('osc/test/value').spectrum.frame);
+  assert.equal(JSON.parse(raw).spectrum.epoch, live.latest.get('osc/test/value').spectrum.epoch);
   client.close();
   await once(client, 'close');
   assert.equal(source.readyState, WebSocket.OPEN);

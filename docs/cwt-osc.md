@@ -186,3 +186,194 @@ and other router workloads. Pi cost has not been measured; the host result is no
 a Pi estimate. If Pi CPU cost is C ms/frame, the current schedule consumes roughly
 C/10 percent of one core. An all-stream H Hz schedule would multiply cost by N×H.
 Always-on operation makes this cost continuous rather than browser-dependent.
+
+## Optional full-scale spectrum (schema version 1)
+
+This additive endpoint does not change either `/cwt/voice/<id>` or `/cwt/voices`.
+The resident sidecar attaches a compact spectrum to each existing analysis result;
+the router selects updates for OSC. No second CWT is computed, and no oscillator
+bank or SuperCollider instrument changes are included.
+
+Enable it in the **router's** environment or `router/.env` (restart the router):
+
+```dotenv
+CWT_SPECTRUM_OSC_ENABLED=1
+CWT_SPECTRUM_OSC_INTERVAL_MS=1000
+```
+
+Defaults are `0` (disabled) and `1000` ms. Enabled accepts exactly `0` or `1`;
+interval must be finite and at least 1000 ms. A larger interval reduces publication
+frequency **per stream**. These settings do not change the resident analysis
+schedule, scale configuration, tracking, or voice OSC publication/replay timing.
+Both the updated sidecar and router must be running; an older sidecar continues
+to provide voices but cannot supply spectrum frames.
+
+The router encodes spectra only when at least one existing OSC destination is
+registered. It publishes at most one new valid result per stream per interval;
+intermediate results are dropped, not queued. Cached resident frames are not
+retransmitted. Invalidation, recovery and new analysis epochs bypass the interval
+to communicate state changes promptly. Repeated identical invalid states are
+suppressed. Subscribe and heartbeat retain their existing voice replay behavior;
+spectra arrive on the next selected new analysis result, not in a heartbeat replay.
+No spectrum output timer or new UDP port is added.
+
+### Address and argument layout
+
+```text
+/osc/<device>/<signal>/cwt/spectrum
+,isddisiii followed by fff for every scale in this packet
+```
+
+| Argument (1-based, excluding address) | OSC type | Meaning |
+|---|---|---|
+| 1 | i | Schema version: 1 |
+| 2 | s | Opaque publication epoch UUID |
+| 3 | d | Monotonically increasing integer publication frame number within epoch |
+| 4 | d | Analysis window end `timestampUs`, same source clock as voices |
+| 5 | i | Spectrum valid/ready: 1 or 0 |
+| 6 | s | Empty when valid; otherwise invalidation reason |
+| 7 | i | Total number of scales in the complete valid frame |
+| 8 | i | Zero-based first scale index in this packet |
+| 9 | i | Number of scale triples in this packet |
+| 10 onward | f,f,f repeated | Environmental frequency Hz, normalized RMS magnitude, circular phase radians |
+
+Order is the CWT's existing **increasing period / decreasing frequency** order.
+The default 48 logarithmic scales have `period[i] = 20^(i/47)` seconds and
+`frequency[i] = 1/period[i]` Hz, from 1 Hz to 0.05 Hz. The actual frequencies are
+carried in every frame; consumers must not assume 48 or infer frequencies from an
+index. OSC `f` rounds scale fields to float32, consistent with the router's scalar
+sensor encoding; `d` preserves source timestamp precision and integer frame IDs.
+No pitch mapping, MIDI quantization, confidence weighting or display log scaling
+is applied to the scale triples.
+
+For illustration, a complete three-scale fixture is:
+
+```text
+/osc/indoor-sky/temperature/cwt/spectrum
+,isddisiiifffffffff
+1 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 1 527348402711 1 "" 3 0 3
+1.0 0.002 0.5   0.2236068 0.010 -1.2   0.05 0.003 2.1
+```
+
+The production 48-scale temperature frame is **856 bytes**. Packets are limited to
+1200 bytes (UDP payload), leaving room for normal LAN/Tailscale overhead. Larger
+spectra or longer stream addresses are split into consecutive ranges. All chunks
+share version, address, epoch, frame number, timestamp, validity and total count.
+A path whose header alone cannot fit the budget cannot be published.
+
+Reassembly procedure:
+
+1. Key pending frames by `(OSC address, epoch, frame number)`.
+2. Check metadata agrees; place each triple at `offset + localIndex` and verify
+   the range is within `0..totalCount-1`. Identical duplicate chunks are harmless;
+   reject conflicting duplicates or metadata.
+3. Apply only a complete frame with every scale present. Never mix frame numbers
+   or epochs. Discard incomplete frames after a bounded timeout (for example five
+   seconds); a subsequent complete update replaces the prior snapshot.
+4. Ignore older frame numbers within the current epoch. On an epoch change, discard
+   old pending data and treat it as a reset. Epoch UUIDs are opaque, not sortable.
+
+UDP is best-effort, with no retransmission or history. A client joining midway
+through a chunked frame waits for the next complete result. Apply a receiver
+silence timeout appropriate to stream count and configured interval; spectra do
+not have the voice endpoint's five-second replay guarantee.
+
+### Magnitude and phase semantics
+
+`router/cwt.js:computeCwt` computes complex Morlet coefficients `W = re + i*im`
+on mean-subtracted, boxcar-decimated data. It stores per-time/per-scale:
+
+```text
+power[t] = (re[t]^2 + im[t]^2) / scaleSamples
+phase[t] = atan2(im[t], re[t])
+scaleSamples = periodSeconds * analysisSampleRate * w0 / (2*pi), w0 = 6
+```
+
+`ResidentAnalyzer` already uses `summarizeCwt` over the last quarter of the CWT
+window, starting at `floor(sampleCount * 0.75)`. Version 1 preserves that reduction:
+
+```text
+magnitude = sqrt(mean(power[t]))
+phase = atan2(sum(power[t] * sin(phase[t])), sum(power[t] * cos(phase[t])))
+```
+
+Both quantities come from the **same coefficients and same recent time interval**
+of one analysis frame. Magnitude is the RMS modulus of the scale-normalized complex
+coefficients, in the input signal's units under the existing CWT normalization.
+It is **not raw unnormalized |W|**, not power, not an AR(1) excess ratio, and not a
+tracker strength. Phase is the existing power-weighted circular summary, not a
+tracked phase or an instantaneous coefficient's phase. This pair is not the complex
+arithmetic mean of W. Default temporal support is 75 decimated samples (about
+15 seconds), within the unchanged 60-second source window at 5 Hz analysis rate.
+
+The timestamp names that source window's end, as it does for voices. Decimation
+averages blocks; the final resampled endpoint can be discarded by the existing
+floor-to-full-block rule. No instantaneous phase at the window-end timestamp or
+sub-second event timing is implied. The CWT's existing finite-window/edge effects
+and short-gap interpolation also remain unchanged.
+
+### Invalidity and reset semantics
+
+No unavailable phase is filled with zero. A circular phase is considered undefined
+when power is zero or the circular resultant is at most machine epsilon times
+summed power. If **any** scale lacks phase, has a non-finite value, overflows float32,
+has invalid frequency/order, or has negative magnitude, the entire spectrum is
+sent as invalid with no triples. Voice readiness and tracker behavior are unaffected
+(e.g. a constant input can be voice-analysis-ready but spectrum-invalid).
+
+Invalid packets have valid=0, total=offset=count=0 and a reason such as
+`phase-unavailable`, `invalid-scale`, `missing-scales`, `coverage`, `stale`, `idle`,
+`timestamp-discontinuity` or `analyzer-disconnected`. Example:
+
+```text
+/osc/indoor-sky/temperature/cwt/spectrum
+,isddisiii
+1 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 2 527348402711 0 "phase-unavailable" 0 0 0
+```
+
+The sidecar gives each stream-buffer lifetime a UUID and increments an internal
+analysis-result counter only on new analyses or invalidation. Cached results retain
+that identity. Buffer recreation (timestamp discontinuity, explicit removal,
+staleness or sidecar restart) gets a new UUID. The router maps that identity to a
+publication epoch UUID, also fresh after router restart, and numbers emitted frames
+starting at 1. A readiness change without buffer recreation stays in the same epoch.
+A bridge disconnect emits a new invalid publication frame with the last available
+source timestamp; it does not fabricate a new source time. Invalid/missing source
+time uses -1 and reason `invalid-timestamp`. Source device clocks may be uptime,
+not UTC; epoch/frame identity disambiguates reset and repeated timestamps.
+
+### Observe from a subscriber
+
+Use the standalone registration procedure above: listen on 9000, subscribe on
+5005, heartbeat every ten seconds. Any OSC monitor that displays float/double/string
+arguments can inspect `/osc/*/*/cwt/spectrum`. For a native SuperCollider monitor
+only (no synths, and do not run alongside another native client on this IP/port):
+
+```supercollider
+(
+~spectrumRouter = NetAddr("192.168.0.41", 5005);
+thisProcess.openUDPPort(9000);
+~spectrumMonitor = { |msg, time, sender, port|
+    if((port == 9000) and: { sender.ip == ~spectrumRouter.ip }
+        and: { msg[0].asString.endsWith("/cwt/spectrum") }) { msg.postln };
+};
+thisProcess.addOSCRecvFunc(~spectrumMonitor);
+~spectrumRouter.sendMsg('/router/subscribe', 9000);
+~spectrumHeartbeat = Routine({ loop {
+    10.wait; ~spectrumRouter.sendMsg('/router/heartbeat', 9000);
+} }).play(SystemClock);
+)
+// Cleanup:
+~spectrumHeartbeat.stop;
+thisProcess.removeOSCRecvFunc(~spectrumMonitor);
+~spectrumRouter.sendMsg('/router/unsubscribe', 9000);
+```
+
+No Pi analysis-frequency increase is made. At default scale count, the unchanged
+one-analysis-per-second round robin adds at most about 856 bytes/second of spectrum
+payload per receiver in steady state (plus transition packets and network headers).
+A longer per-stream interval can lower this further. The extra work is 48 square
+roots/compact triples per analysis, validation and OSC encoding at publication,
+and a compact addition to the existing sidecar WebSocket frame. Disabled mode adds
+no spectrum UDP packets or encoding; the compact sidecar metadata remains present.
+No Pi CPU measurement or deployment is included in this change.
