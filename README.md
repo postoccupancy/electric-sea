@@ -307,6 +307,13 @@ sudo systemctl enable cloudflared
 sudo systemctl start cloudflared
 ```
 
+**Restart cloudflare tunnel**
+```bash
+sudo systemctl restart cloudflared
+# check
+systemctl status cloudflared --no-pager
+```
+
 **Change the subdomain:**
 1. Update `/etc/cloudflared/config.yml` with new hostname
 2. `cloudflared tunnel route dns resident-frequency newname.postoccupancy.com`
