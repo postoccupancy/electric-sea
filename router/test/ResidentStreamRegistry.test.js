@@ -93,7 +93,7 @@ test('staggers analysis across streams in round-robin order', () => {
   assert.equal(registry.analyzeNext({ nowTimestampUs: 2_000_000 }).device, 'osc/a');
   assert.equal(registry.analyzeNext({ nowTimestampUs: 2_000_000 }).device, 'osc/b');
   assert.equal(registry.analyzeNext({ nowTimestampUs: 2_000_000 }).device, 'osc/a');
-  assert.equal(analyzed.length, 3);
+  assert.equal(analyzed.length, 2);
 });
 
 test('ingests timestamped router batches', () => {
@@ -125,7 +125,10 @@ test('removes streams after the configured inactive interval', () => {
   const { registry } = fakeRegistry({ staleAfterSeconds: 5 });
   registry.ingest('osc/test', 1_000_000, 1, null, 1_000_000);
 
-  assert.deepEqual(registry.analyzeAll({ nowTimestampUs: 7_000_000 }), []);
+  const messages = registry.analyzeAll({ nowTimestampUs: 7_000_000 });
+  assert.equal(messages[0].reason, 'stale');
+  assert.equal(messages[0].ready, false);
+  assert.deepEqual(messages[0].voices, []);
   assert.equal(registry.size, 0);
 });
 
@@ -134,4 +137,37 @@ test('explicitly removes an unavailable stream', () => {
   registry.ingest('osc/test', 1_000_000, 1);
   assert.equal(registry.remove('osc/test'), true);
   assert.equal(registry.snapshot('osc/test'), null);
+});
+
+test('repeated source frames do not advance confidence; unavailable streams retain latest state', () => {
+  const { registry, tracked } = fakeRegistry();
+  registry.ingest('osc/test/value', 100, 1);
+  registry.analyzeNext();
+  registry.analyzeNext();
+  assert.equal(tracked.length, 1);
+  registry.remove('osc/test/value', 'idle');
+  assert.equal(registry.analyzeNext().reason, 'idle');
+  assert.equal(registry.latest.get('osc/test/value').ready, false);
+  registry.ingest('osc/test/value', 200, 2);
+  assert.equal(registry.analyzeNext().ready, true);
+});
+
+test('readiness loss clears voices and recovered tracks keep increasing IDs', () => {
+  let ready = true;
+  const registry = new ResidentStreamRegistry({
+    createAnalyzer: () => ({ analyze: () => ({ ready, reason: ready ? null : 'coverage', coverage: ready ? 1 : 0,
+      candidates: [{ frequencyHz: 0.5, strength: 1, phase: 0, excessRatio: 4 }] }) }),
+  });
+  registry.ingest('osc/test/value', 100, 1);
+  const first = registry.analyzeNext().voices[0].id;
+  ready = false;
+  registry.ingest('osc/test/value', 200, 1);
+  assert.deepEqual(registry.analyzeNext().voices, []);
+  ready = true;
+  registry.ingest('osc/test/value', 300, 1);
+  const second = registry.analyzeNext().voices[0].id;
+  assert.ok(second > first);
+  registry.remove('osc/test/value'); registry.drainPending();
+  registry.ingest('osc/test/value', 400, 1);
+  assert.ok(registry.analyzeNext().voices[0].id > second);
 });

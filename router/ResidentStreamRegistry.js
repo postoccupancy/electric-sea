@@ -35,14 +35,34 @@ class ResidentStreamRegistry {
     });
     this.streams = new Map();
     this.analysisCursor = 0;
+    this.latest = new Map();
+    this.pending = [];
+    this.nextIds = new Map();
   }
 
   get size() {
     return this.streams.size;
   }
 
-  remove(streamId) {
+  remove(streamId, reason = 'idle') {
+    const entry = this.streams.get(streamId);
+    if (!entry) return false;
+    this.nextIds.set(streamId, entry.tracker.nextId);
+    const message = {
+      type: 'resident_voices', device: streamId, timestampUs: entry.lastTimestampUs,
+      value: entry.lastValue, ready: false, reason, coverage: 0, voices: [],
+    };
+    this.latest.set(streamId, message);
+    this.pending.push(message);
     return this.streams.delete(streamId);
+  }
+
+  drainPending() { return this.pending.splice(0); }
+
+  expire(nowTimestampUs) {
+    for (const [streamId, entry] of this.streams) {
+      if (nowTimestampUs - entry.lastReceivedAtUs > this.staleAfterUs) this.remove(streamId, 'stale');
+    }
   }
 
   ingest(streamId, timestampUs, value, sequence = null, receivedAtUs = Date.now() * 1000) {
@@ -82,23 +102,13 @@ class ResidentStreamRegistry {
   }
 
   analyzeAll({ nowTimestampUs = Date.now() * 1000 } = {}) {
-    const messages = [];
-    for (const [streamId, entry] of this.streams) {
-      if (nowTimestampUs - entry.lastReceivedAtUs > this.staleAfterUs) {
-        this.streams.delete(streamId);
-        continue;
-      }
-      messages.push(this.#analyze(streamId, entry));
-    }
-    return messages;
+    this.expire(nowTimestampUs);
+    return [...this.drainPending(), ...[...this.streams].map(([id, entry]) => this.#analyze(id, entry))];
   }
 
   analyzeNext({ nowTimestampUs = Date.now() * 1000 } = {}) {
-    for (const [streamId, entry] of this.streams) {
-      if (nowTimestampUs - entry.lastReceivedAtUs > this.staleAfterUs) {
-        this.streams.delete(streamId);
-      }
-    }
+    this.expire(nowTimestampUs);
+    if (this.pending.length) return this.pending.shift();
     const entries = [...this.streams.entries()];
     if (entries.length === 0) return null;
     this.analysisCursor %= entries.length;
@@ -129,6 +139,7 @@ class ResidentStreamRegistry {
         lastValue: null,
         lastReceivedAtUs: Date.now() * 1000,
       };
+      if (this.nextIds.has(streamId)) entry.tracker.nextId = this.nextIds.get(streamId);
       this.streams.set(streamId, entry);
     }
     return entry;
@@ -146,21 +157,23 @@ class ResidentStreamRegistry {
     // A device reboot changes its uptime origin; a malformed transport frame
     // can produce an impossible future timestamp. Either way, begin a clean
     // analysis epoch instead of leaving one outlier to poison the ring buffer.
-    this.streams.delete(streamId);
+    this.remove(streamId, 'timestamp-discontinuity');
     return this.#entry(streamId);
   }
 
   #analyze(streamId, entry) {
+    if (entry.latest?.timestampUs === entry.lastTimestampUs) return entry.latest;
     const interpolation = this.interpolationFor(streamId);
     const analysis = entry.analyzer.analyze(entry.buffer, {
       endTimestampUs: entry.lastTimestampUs,
       interpolation,
     });
-    const voices = entry.tracker.update(
-      analysis.ready ? analysis.candidates : [],
-      { timestampUs: entry.lastTimestampUs },
-    );
-    return {
+    // Readiness loss terminates tracks immediately; IDs are never reused in this process.
+    if (!analysis.ready) entry.tracker.voices = [];
+    const voices = analysis.ready ? entry.tracker.update(
+      analysis.candidates, { timestampUs: entry.lastTimestampUs },
+    ) : [];
+    const message = {
       type: 'resident_voices',
       device: streamId,
       timestampUs: entry.lastTimestampUs,
@@ -171,6 +184,9 @@ class ResidentStreamRegistry {
       coverage: analysis.coverage,
       voices,
     };
+    entry.latest = message;
+    this.latest.set(streamId, message);
+    return message;
   }
 }
 

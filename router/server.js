@@ -187,115 +187,7 @@ function indoorUsbBoundaryStatus() {
 
 // ─── OSC encoding helpers ─────────────────────────────────────────────────────
 
-function encodeOSCString(str) {
-  const buf = Buffer.alloc(Math.ceil((str.length + 1) / 4) * 4);
-  buf.write(str, 0, 'ascii');
-  return buf;
-}
-function encodeOSCFloat(f) {
-  const buf = Buffer.alloc(4);
-  buf.writeFloatBE(f, 0);
-  return buf;
-}
-function encodeOSCInt(i) {
-  const buf = Buffer.alloc(4);
-  buf.writeInt32BE(i, 0);
-  return buf;
-}
-function encodeOSCDouble(value) {
-  const buf = Buffer.alloc(8);
-  buf.writeDoubleBE(value, 0);
-  return buf;
-}
-
-function buildOSCMessage(address, ...args) {
-  const addrBuf = encodeOSCString(address);
-  let typeTags  = ',';
-  const argBufs = [];
-  for (const arg of args) {
-    if (typeof arg === 'number' && Number.isInteger(arg)) {
-      typeTags += 'i'; argBufs.push(encodeOSCInt(arg));
-    } else if (typeof arg === 'number') {
-      typeTags += 'f'; argBufs.push(encodeOSCFloat(arg));
-    } else if (typeof arg === 'string') {
-      typeTags += 's'; argBufs.push(encodeOSCString(arg));
-    }
-  }
-  return Buffer.concat([addrBuf, encodeOSCString(typeTags), ...argBufs]);
-}
-
-function buildTypedOSCMessage(address, types, args) {
-  const encoded = args.map((arg, index) => {
-    const type = types[index];
-    if (type === 'i') return encodeOSCInt(arg | 0);
-    if (type === 'f') return encodeOSCFloat(arg);
-    if (type === 'd') return encodeOSCDouble(arg);
-    if (type === 's') return encodeOSCString(arg);
-    throw new Error(`Unsupported OSC type: ${type}`);
-  });
-  return Buffer.concat([encodeOSCString(address), encodeOSCString(`,${types}`), ...encoded]);
-}
-
-function buildScalarBatchOsc(batch) {
-  const marker = Buffer.alloc(16);
-  marker.write('#bundle\0', 0, 'ascii');
-  marker.writeUInt32BE(1, 12);
-  const elements = [marker];
-  for (const stream of batch.streams) {
-    const types = ['i', 'd', 's'];
-    const args = [batch.packetSequence, batch.sendTimeUs, stream.unit || ''];
-    for (const sample of stream.samples) {
-      types.push('i', 'i', 'f');
-      args.push(sample[0], Math.trunc(sample[1] - batch.sendTimeUs), sample[2]);
-    }
-    const message = buildTypedOSCMessage(`/batch/${stream.name}/${stream.param}`, types.join(''), args);
-    const size = Buffer.alloc(4);
-    size.writeUInt32BE(message.length);
-    elements.push(size, message);
-  }
-  return Buffer.concat(elements);
-}
-
-function parseOSCMessage(buf) {
-  try {
-    let offset = 0;
-    function readString() {
-      const end = buf.indexOf(0, offset);
-      const str = buf.slice(offset, end).toString('ascii');
-      offset = Math.ceil((end + 1) / 4) * 4;
-      return str;
-    }
-    const address  = readString();
-    const typeTags = readString();
-    const args     = [];
-    for (let i = 1; i < typeTags.length; i++) {
-      const tag = typeTags[i];
-      if      (tag === 'f') { args.push(buf.readFloatBE(offset));  offset += 4; }
-      else if (tag === 'i') { args.push(buf.readInt32BE(offset));   offset += 4; }
-      else if (tag === 's') { args.push(readString()); }
-      else if (tag === 'd') { args.push(buf.readDoubleBE(offset));  offset += 8; }
-    }
-    return { address, args };
-  } catch (e) { return null; }
-}
-
-function parseOSCPacket(buf) {
-  if (buf.length < 8 || buf.toString('ascii', 0, 8) !== '#bundle\0') {
-    const message = parseOSCMessage(buf);
-    return message ? [message] : [];
-  }
-
-  const messages = [];
-  let offset = 16; // bundle marker plus 8-byte timetag
-  while (offset + 4 <= buf.length) {
-    const size = buf.readInt32BE(offset);
-    offset += 4;
-    if (size <= 0 || offset + size > buf.length) return [];
-    messages.push(...parseOSCPacket(buf.subarray(offset, offset + size)));
-    offset += size;
-  }
-  return offset === buf.length ? messages : [];
-}
+const { buildOSCMessage, buildScalarBatchOsc, parseOSCPacket } = require('./osc-codec');
 
 // ─── SuperCollider OSC sender ─────────────────────────────────────────────────
 
@@ -314,17 +206,31 @@ const PCM_TCP_PORT = 5008;
 const PCM_USB_DEVICE = process.env.PCM_USB_DEVICE ||
   '/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_24:EC:4A:0E:B1:DC-if00';
 
-const oscReceiveClients = new Set();
+const { OscClients } = require('./osc-clients');
+const { VoiceOsc } = require('./voice-osc');
+const oscReceiveClients = new OscClients();
+const voiceOsc = new VoiceOsc();
+setInterval(() => oscReceiveClients.expire(), 1000).unref();
+// Repeat authoritative state so dropped UDP endings are repaired without an ACK transport.
+setInterval(() => {
+  for (const packet of voiceOsc.snapshot()) sendOSCPacketToClients(packet);
+}, 5000).unref();
+
+function sendVoiceSnapshot(ip) {
+  for (const packet of voiceOsc.snapshot()) {
+    oscOutSocket.send(packet, OSC_OUT_PORT, ip, () => {});
+  }
+}
 
 const oscOutSocket = dgram.createSocket('udp4');
 
 function sendOSCToClient(ip, address, ...args) {
-  try { oscOutSocket.send(buildOSCMessage(address, ...args), OSC_OUT_PORT, ip); } catch (e) {}
+  try { oscOutSocket.send(buildOSCMessage(address, ...args), OSC_OUT_PORT, ip, () => {}); } catch (e) {}
 }
 
 function sendOSCPacketToClients(packet) {
   for (const ip of oscReceiveClients) {
-    try { oscOutSocket.send(packet, OSC_OUT_PORT, ip); } catch (e) {}
+    try { oscOutSocket.send(packet, OSC_OUT_PORT, ip, () => {}); } catch (e) {}
   }
 }
 
@@ -488,7 +394,13 @@ const oscInSocket = dgram.createSocket('udp4');
 oscInSocket.on('message', (buf, rinfo) => {
   const rawIp    = rinfo.address.replace(/^::ffff:/, '');
   const senderIp = (rawIp === '127.0.0.1' || rawIp === '::1') ? os.hostname() : rawIp;
-  const messages = parseOSCPacket(buf);
+  const messages = parseOSCPacket(buf).filter(message => {
+    if (!oscReceiveClients.control(message, rawIp)) return true;
+    if (message.address !== '/router/unsubscribe' && message.args.length === 1 && message.args[0] === OSC_OUT_PORT) {
+      sendVoiceSnapshot(rawIp);
+    }
+    return false;
+  });
   const scalarBatch = decodeScalarBatch(messages, senderIp);
   if (scalarBatch) {
     if (scalarBatch.streams.some(stream => stream.name === 'indoor-sky') &&
@@ -951,45 +863,39 @@ let residentBridge = null;
 let residentBridgeRetry = null;
 const RESIDENT_PORT = Number(process.env.RESIDENT_PORT || 3001);
 
-function residentSubscriberCount() {
-  let count = 0;
+const residentLatest = new Map();
+
+function publishResidentFrame(frame) {
+  if (frame.type === 'resident_voices') residentLatest.set(frame.device, frame);
+  for (const packet of voiceOsc.update(frame)) sendOSCPacketToClients(packet);
+  const message = JSON.stringify(frame);
   for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN && client.residentSubscribed) count++;
+    if (client.residentSubscribed) sendBrowserMessage(client, message, true);
   }
-  return count;
 }
 
 function updateResidentBridge() {
-  const needed = residentSubscriberCount() > 0;
-  if (!needed) {
-    clearTimeout(residentBridgeRetry);
-    residentBridgeRetry = null;
-    if (residentBridge) {
-      const bridge = residentBridge;
-      residentBridge = null;
-      bridge.close();
-    }
-    return;
-  }
+  clearTimeout(residentBridgeRetry);
   if (residentBridge &&
       (residentBridge.readyState === WebSocket.OPEN ||
        residentBridge.readyState === WebSocket.CONNECTING)) return;
 
   residentBridge = new WebSocket(`ws://127.0.0.1:${RESIDENT_PORT}`);
   residentBridge.on('message', raw => {
-    const message = raw.toString();
-    for (const client of wss.clients) {
-      if (client.residentSubscribed) sendBrowserMessage(client, message, true);
-    }
+    try { publishResidentFrame(JSON.parse(raw.toString())); }
+    catch (error) { console.error('Resident frame:', error.message); }
   });
   residentBridge.on('close', () => {
     residentBridge = null;
-    if (residentSubscriberCount() > 0) {
-      residentBridgeRetry = setTimeout(updateResidentBridge, 2000);
+    for (const frame of residentLatest.values()) {
+      publishResidentFrame({ ...frame, ready: false, reason: 'analyzer-disconnected', coverage: 0, voices: [] });
     }
+    residentBridgeRetry = setTimeout(updateResidentBridge, 2000);
   });
   residentBridge.on('error', () => {});
 }
+
+updateResidentBridge();
 
 wss.on('connection', (ws, req) => {
   const rawIp    = (req.headers['x-forwarded-for'] || req.socket.remoteAddress).replace(/^::ffff:/, '');
@@ -999,7 +905,8 @@ wss.on('connection', (ws, req) => {
 
   if (!connectionsByIp.has(clientIp)) connectionsByIp.set(clientIp, new Set());
   connectionsByIp.get(clientIp).add(ws);
-  if (ws.oscUdpAvailable) oscReceiveClients.add(clientIp);
+  if (ws.oscUdpAvailable) oscReceiveClients.add(clientIp, ws);
+  if (ws.oscUdpAvailable) sendVoiceSnapshot(clientIp);
   ws.pcmSubscriptions = new Set();
   ws.pcmAnalysisSubscriptions = new Set();
   ws.residentSubscribed = false;
@@ -1038,6 +945,9 @@ wss.on('connection', (ws, req) => {
       if (data.type === 'resident_subscribe') {
         ws.residentSubscribed = data.enabled !== false;
         updateResidentBridge();
+        if (ws.residentSubscribed) {
+          for (const frame of residentLatest.values()) sendBrowserMessage(ws, JSON.stringify(frame), true);
+        }
         return;
       }
 
@@ -1107,9 +1017,9 @@ wss.on('connection', (ws, req) => {
     ws.pcmSubscriptions.clear();
     ws.pcmAnalysisSubscriptions.clear();
     connectionsByIp.get(clientIp)?.delete(ws);
+    oscReceiveClients.delete(clientIp, ws);
     if (connectionsByIp.get(clientIp)?.size === 0) {
       connectionsByIp.delete(clientIp);
-      oscReceiveClients.delete(clientIp);
     }
     updateResidentBridge();
     broadcastClientStats();

@@ -70,3 +70,43 @@ test('recursively ingests signal batches and ignores notes', () => {
   assert.equal(count, 1);
   assert.deepEqual(registry.calls, [['ingest', 'json/lfo', 500, 0.2, undefined]]);
 });
+
+test('sidecar analyzes with no consumers, replays state and recovers from router loss', async t => {
+  const { WebSocketServer, WebSocket } = require('ws');
+  const { once } = require('node:events');
+  const { startResidentLive } = require('../resident-live');
+  const { ResidentStreamRegistry } = require('../ResidentStreamRegistry');
+  const router = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  await once(router, 'listening');
+  const registry = new ResidentStreamRegistry({
+    analyzerOptions: { windowSeconds: 2, minPeriodSeconds: 0.2, maxPeriodSeconds: 1, minCompletedCycles: 0 },
+  });
+  const connection = once(router, 'connection');
+  const live = startResidentLive({ routerUrl: `ws://127.0.0.1:${router.address().port}`, port: 0, analysisIntervalMs: 20, registry });
+  t.after(() => { live.close(); for (const ws of router.clients) ws.terminate(); router.close(); });
+  const [source] = await connection;
+  const samples = Array.from({ length: 61 }, (_, i) => [i, i * 50000, Math.sin(i / 3)]);
+  source.send(JSON.stringify({ type: 'sample_batch', streams: [{ device: 'osc/test/value', samples }] }));
+  const waitFor = async predicate => {
+    const deadline = Date.now() + 5000;
+    while (!predicate()) {
+      assert.ok(Date.now() < deadline, 'timed out waiting for state');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  };
+  await waitFor(() => live.latest.get('osc/test/value')?.ready);
+  assert.equal(live.latest.get('osc/test/value').timestampUs, 3000000);
+  const client = new WebSocket(`ws://127.0.0.1:${live.server.address().port}`);
+  t.after(() => client.terminate());
+  const [raw] = await once(client, 'message');
+  assert.equal(JSON.parse(raw).ready, true);
+  client.close();
+  await once(client, 'close');
+  assert.equal(source.readyState, WebSocket.OPEN);
+  const reconnected = once(router, 'connection');
+  source.close();
+  await waitFor(() => live.latest.get('osc/test/value')?.reason === 'router-disconnected');
+  const [nextSource] = await reconnected;
+  nextSource.send(JSON.stringify({ type: 'sample_batch', streams: [{ device: 'osc/test/value', samples }] }));
+  await waitFor(() => live.latest.get('osc/test/value')?.ready);
+});

@@ -16,10 +16,10 @@ test('modulation spectrum page uses the serving HTTPS origin and PCM subscriptio
   assert.match(html, /IMA_STEP/);
 });
 
-test('resident sidecar stays local and skips analysis without browser clients', () => {
+test('resident sidecar stays local and analyzes without browser clients', () => {
   const source = fs.readFileSync(path.join(__dirname, '../resident-live.js'), 'utf8');
-  assert.match(source, /if \(wss\.clients\.size === 0\) return;/);
-  assert.match(source, /if \(wss\.clients\.size === 0 \|\| routerSocket\) return;/);
+  assert.doesNotMatch(source, /if \(wss\.clients\.size === 0\) return;/);
+  assert.match(source, /if \(closed \|\| routerSocket\) return;/);
   assert.match(source, /server\.listen\(port, '127\.0\.0\.1'/);
 });
 
@@ -36,7 +36,7 @@ test('OSC UDP output is automatic for direct clients and disabled through Cloudf
   const server = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
   const page = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
   assert.match(server, /const viaCloudflare = Boolean/);
-  assert.match(server, /if \(ws\.oscUdpAvailable\) oscReceiveClients\.add\(clientIp\)/);
+  assert.match(server, /if \(ws\.oscUdpAvailable\) oscReceiveClients\.add\(clientIp, ws\)/);
   assert.doesNotMatch(server, /data\.type === 'osc_toggle_receive'/);
   assert.match(page, /ALWAYS ON/);
   assert.match(page, /DISABLED/);

@@ -711,3 +711,11 @@ Network not in scan range. Run `sudo nmcli dev wifi rescan` then retry. Check si
 
 **Channel assignments missing after switching browsers**
 Assignments are stored in localStorage per browser. They don't follow you to a different machine or browser profile. Re-enter assignments or export/import via browser console if needed.
+
+### Continuous CWT voices and standalone OSC receivers
+
+The resident sidecar runs continuously and the router distributes tracked voices
+on its existing UDP port 9000. Standalone receivers register with
+`/router/subscribe 9000` on UDP 5005 and maintain a heartbeat.
+See [CWT OSC protocol and operation](docs/cwt-osc.md) for argument types,
+termination/state handling, LAN/Tailscale registration, timestamps and benchmarking.

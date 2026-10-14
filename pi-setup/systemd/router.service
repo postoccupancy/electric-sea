@@ -1,6 +1,7 @@
 [Unit]
 Description=Resident Frequency Signal Router
 After=network.target
+Wants=resident.service
 
 [Service]
 Type=simple

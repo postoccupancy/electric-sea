@@ -70,57 +70,50 @@ function startResidentLive({ routerUrl = ROUTER_URL, port = PORT, analysisInterv
   const wss = new WebSocketServer({ server });
   let routerSocket;
   let reconnectTimer;
+  let closed = false;
+  const publish = message => {
+    latest.set(message.device, message);
+    const json = JSON.stringify(message);
+    for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(json);
+  };
+  const unavailable = reason => {
+    for (const device of registry.streams.keys()) registry.remove(device, reason);
+    for (const message of registry.drainPending()) publish(message);
+  };
   const connect = () => {
-    if (wss.clients.size === 0 || routerSocket) return;
+    if (closed || routerSocket) return;
     routerSocket = new WebSocket(routerUrl, { rejectUnauthorized: false });
     routerSocket.on('message', raw => {
       try {
         const data = JSON.parse(raw.toString());
         if (data.type === 'streams_unavailable' && Array.isArray(data.devices)) {
-          for (const device of data.devices) {
-            registry.remove(device);
-            const previous = latest.get(device);
-            if (!previous) continue;
-            const message = {
-              ...previous, ready: false, reason: 'idle', coverage: 0, voices: []
-            };
-            latest.set(device, message);
-            const json = JSON.stringify(message);
-            for (const client of wss.clients) {
-              if (client.readyState === WebSocket.OPEN) client.send(json);
-            }
-          }
+          for (const device of data.devices) registry.remove(device);
+          for (const message of registry.drainPending()) publish(message);
           return;
         }
         ingestRouterMessage(registry, data, Date.now() * 1000,
           (device, value) => liveValues.set(device, value));
+        for (const message of registry.drainPending()) publish(message);
       } catch {}
     });
     routerSocket.on('close', () => {
       routerSocket = null;
-      if (wss.clients.size > 0) reconnectTimer = setTimeout(connect, 2000);
+      unavailable('router-disconnected');
+      if (!closed) reconnectTimer = setTimeout(connect, 2000);
     });
     routerSocket.on('error', () => {});
   };
   wss.on('connection', client => {
     for (const message of latest.values()) client.send(JSON.stringify(message));
     connect();
-    client.on('close', () => {
-      if (wss.clients.size !== 0) return;
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-      const socket = routerSocket;
-      routerSocket = null;
-      socket?.close();
-    });
   });
+  connect();
   const analysisTimer = setInterval(() => {
-    if (wss.clients.size === 0) return;
+    registry.expire(Date.now() * 1000);
+    for (const message of registry.drainPending()) publish(message);
     const message = registry.analyzeNext();
     if (!message) return;
-    latest.set(message.device, message);
-    const json = JSON.stringify(message);
-    for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(json);
+    publish(message);
   }, analysisIntervalMs);
   const valueTimer = setInterval(() => {
     if (wss.clients.size === 0 || liveValues.size === 0) return;
@@ -131,7 +124,7 @@ function startResidentLive({ routerUrl = ROUTER_URL, port = PORT, analysisInterv
   }, 250);
   server.listen(port, '127.0.0.1',
     () => console.log(`Resident voices: http://127.0.0.1:${port}/resident/`));
-  return { server, registry, close() { clearInterval(analysisTimer); clearInterval(valueTimer); clearTimeout(reconnectTimer); routerSocket?.close(); wss.close(); server.close(); } };
+  return { server, registry, latest, close() { closed = true; clearInterval(analysisTimer); clearInterval(valueTimer); clearTimeout(reconnectTimer); routerSocket?.close(); wss.close(); server.close(); } };
 }
 
 if (require.main === module) startResidentLive();
