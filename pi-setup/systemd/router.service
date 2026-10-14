@@ -6,7 +6,7 @@ Wants=resident.service
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/pi-projects/router
+WorkingDirectory=/home/pi/electric-sea/router
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5
