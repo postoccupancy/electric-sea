@@ -187,7 +187,7 @@ a Pi estimate. If Pi CPU cost is C ms/frame, the current schedule consumes rough
 C/10 percent of one core. An all-stream H Hz schedule would multiply cost by N×H.
 Always-on operation makes this cost continuous rather than browser-dependent.
 
-## Optional full-scale spectrum (schema version 2)
+## Optional full-scale spectrum (schema version 3)
 
 This additive endpoint does not change either `/cwt/voice/<id>` or `/cwt/voices`.
 The resident sidecar attaches a compact spectrum to each existing analysis result;
@@ -205,8 +205,9 @@ Defaults are `0` (disabled) and `1000` ms. Enabled accepts exactly `0` or `1`;
 interval must be finite and at least 1000 ms. A larger interval reduces publication
 frequency **per stream**. These settings do not change the resident analysis
 schedule, scale configuration, tracking, or voice OSC publication/replay timing.
-Both the updated sidecar and router must be running; an older sidecar continues
-to provide voices but cannot supply spectrum frames.
+Run both the updated sidecar and router for v3 background data. A sidecar predating
+the spectrum feature continues to provide voices but cannot supply spectrum frames;
+a v2-era sidecar supplies magnitudes with unavailable background during upgrade.
 
 The router encodes spectra only when at least one existing OSC destination is
 registered. It publishes at most one new valid result per stream per interval;
@@ -221,21 +222,21 @@ No spectrum output timer or new UDP port is added.
 
 ```text
 /osc/<device>/<signal>/cwt/spectrum
-,isddisiii followed by fffi for every scale in this packet
+,isddisiii followed by fffifi for every scale in this packet
 ```
 
 | Argument (1-based, excluding address) | OSC type | Meaning |
 |---|---|---|
-| 1 | i | Schema version: 2 |
+| 1 | i | Schema version: 3 |
 | 2 | s | Opaque publication epoch UUID |
 | 3 | d | Monotonically increasing integer publication frame number within epoch |
 | 4 | d | Analysis window end `timestampUs`, same source clock as voices |
-| 5 | i | Magnitude spectrum valid/ready: 1 or 0 (independent of phase availability) |
+| 5 | i | Magnitude spectrum valid/ready: 1 or 0 (independent of phase/background availability) |
 | 6 | s | Empty when valid; otherwise invalidation reason |
 | 7 | i | Total number of scales in the complete valid frame |
 | 8 | i | Zero-based first scale index in this packet |
 | 9 | i | Number of scale records in this packet |
-| 10 onward | f,f,f,i repeated | Environmental frequency Hz, normalized RMS magnitude, phase radians or placeholder, phaseValid (0 or 1) |
+| 10 onward | f,f,f,i,f,i repeated | frequencyHz, magnitude, phase, phaseValid, backgroundPower, backgroundValid |
 
 Order is the CWT's existing **increasing period / decreasing frequency** order.
 The default 48 logarithmic scales have `period[i] = 20^(i/47)` seconds and
@@ -246,47 +247,62 @@ sensor encoding; `d` preserves source timestamp precision and integer frame IDs.
 No pitch mapping, MIDI quantization, confidence weighting or display log scaling
 is applied to the scale records.
 
-For each record `(frequencyHz, magnitude, phase, phaseValid)`, use phase **only when
-phaseValid=1**. When phaseValid=0, the phase field is a finite zero placeholder with
+For each record `(frequencyHz, magnitude, phase, phaseValid, backgroundPower, backgroundValid)`,
+use phase **only when phaseValid=1**. When phaseValid=0, the phase field is a finite zero placeholder with
 no phase meaning; frequency and magnitude remain usable. A measured phase of zero
 radians is distinguished by phaseValid=1. All phases can be unavailable while the
 magnitude spectrum remains valid (header argument 5 is still 1). Magnitude-only
 consumers may ignore both phase fields.
 
-Version 2 changes the per-scale stride from v1's three floats to three floats plus
-an int32 validity flag. The nine-field header keeps its layout and metadata meaning,
-with validity now scoped to magnitude data. Consumers must check version=2 and
-advance four arguments per scale; v1-only decoders must reject v2 rather than treat
-flags as frequencies. This endpoint now emits v2 only. Tracked voice endpoints and
-`live-cwt.scd` are unchanged. The resident sidecar's internal arrays remain triples,
-with null marking undefined circular phase; only OSC serialization changes.
+Use backgroundPower as a normalization denominator **only when backgroundValid=1**.
+The flag is 1 only for strictly positive finite background power that remains
+strictly positive and finite after float32 rounding. Otherwise backgroundPower=0
+is a placeholder and backgroundValid=0. Zero, negative, missing, non-finite,
+float32-overflowing and float32-underflowing background estimates are unavailable;
+no small positive floor is substituted. A valid zero magnitude remains valid even
+when no usable denominator exists. The two validity flags are independent; neither
+changes the magnitude-valid header or publication schedule.
 
-With the address included at index 0 (as in SuperCollider), record `i` starts at
-`msg[10 + 4*i]`: frequency, magnitude, phase and flag are at offsets 0, 1, 2 and 3.
-With an address-free JavaScript `args` array, use `args[9 + 4*i]` instead.
+Version 3 appends backgroundPower and backgroundValid to v2's four-field record.
+The nine-field header retains its layout and meaning. Consumers must check
+version=3 and use a six-argument stride; v2-only decoders must reject v3. This
+endpoint emits v3 only, with no additional fields hidden in v2 packets. Tracked
+voice endpoints and `live-cwt.scd` remain unchanged. The sidecar now appends its
+existing background value to each internal `(frequency, magnitude, phase)` array.
+A new router can accept older sidecar triples during upgrade, but those publish
+backgroundValid=0 until the sidecar is updated.
+
+With the address at index 0 (SuperCollider), record `i` starts at
+`msg[10 + 6*i]`. An address-free JavaScript `args` array uses `args[9 + 6*i]`.
+Offsets 0..5 are frequency, magnitude, phase, phaseValid, backgroundPower,
+backgroundValid. A magnitude-driven consumer needs only offsets 0, 1, 4 and 5.
 
 For illustration, a complete three-scale fixture is:
 
 ```text
 /osc/indoor-sky/temperature/cwt/spectrum
-,isddisiiifffifffifffi
-2 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 1 527348402711 1 "" 3 0 3
-1.0 0.002 0.5 1   0.2236068 0.010 0.0 0   0.05 0.0 0.0 0
+,isddisiiifffififffififffifi
+3 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 1 527348402711 1 "" 3 0 3
+1.0 0.002 0.5 1 0.000001 1
+0.2236068 0.010 0.0 0 0.000025 1
+0.05 0.0 0.0 0 0.0 0
 ```
 
 Here the second and third scales have unavailable phase; the third scale also has
-zero magnitude. All three frequency/magnitude pairs are valid.
+zero magnitude and unusable background. All three frequency/magnitude pairs are
+valid. For the first two records, magnitude/sqrt(backgroundPower) is approximately 2.
 
-The production 48-scale temperature frame is **1096 bytes**. Packets are limited to
-1200 bytes (UDP payload), leaving room for normal LAN/Tailscale overhead. Larger
-spectra or longer stream addresses are split into consecutive ranges. All chunks
-share version, address, epoch, frame number, timestamp, validity and total count.
+The default 48-scale temperature frame now requires **two packets**: 35 records
+(offset 0, 1,188 bytes) and 13 records (offset 35, 528 bytes), totaling **1,716 bytes**
+of OSC payload. A single unchunked frame would be 1,576 bytes. The existing
+1,200-byte UDP payload budget is unchanged; longer addresses or more scales may
+produce different chunk boundaries. All chunks share version, address, epoch, frame number, timestamp, validity and total count.
 A path whose header alone cannot fit the budget cannot be published.
 
 Reassembly procedure:
 
 1. Key pending frames by `(OSC address, epoch, frame number)`.
-2. Check metadata agrees; place each four-field record at `offset + localIndex` and verify
+2. Check metadata agrees; place each six-field record at `offset + localIndex` and verify
    the range is within `0..totalCount-1`. Identical duplicate chunks are harmless;
    reject conflicting duplicates or metadata.
 3. Apply only a complete frame with every scale present. Never mix frame numbers
@@ -312,7 +328,7 @@ scaleSamples = periodSeconds * analysisSampleRate * w0 / (2*pi), w0 = 6
 ```
 
 `ResidentAnalyzer` already uses `summarizeCwt` over the last quarter of the CWT
-window, starting at `floor(sampleCount * 0.75)`. Version 2 preserves the same temporal reduction as v1:
+window, starting at `floor(sampleCount * 0.75)`. Version 3 preserves the same temporal reduction as v1/v2:
 
 ```text
 magnitude = sqrt(mean(power[t]))
@@ -350,19 +366,19 @@ than triggering a frame-level validity transition.
 Frequencies must remain positive, finite, representable as positive float32 values,
 and strictly decreasing. Magnitudes must remain finite, nonnegative and finite in
 float32. Invalid frequency or magnitude data, malformed arrays (other than the
-optional phase value), and nonnumeric phase values such as strings/objects still
+optional phase value), and nonnumeric phase/background values such as strings/objects still
 invalidate the entire frame. Missing/empty scales and analysis-not-ready states
 also remain invalid. Voice readiness and tracker behavior are unaffected.
 
 Invalid packets have valid=0, total=offset=count=0 and a reason such as
 `invalid-scale`, `missing-scales`, `coverage`, `stale`, `idle`,
 `timestamp-discontinuity` or `analyzer-disconnected`. `phase-unavailable` is no
-longer a frame invalidation reason in v2. Example:
+longer a frame invalidation reason since v2. Example:
 
 ```text
 /osc/indoor-sky/temperature/cwt/spectrum
 ,isddisiii
-2 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 2 527348402711 0 "invalid-scale" 0 0 0
+3 "cb75f8fe-a18c-46ec-bf9f-638d389edb07" 2 527348402711 0 "invalid-scale" 0 0 0
 ```
 
 The sidecar gives each stream-buffer lifetime a UUID and increments an internal
@@ -375,6 +391,134 @@ A bridge disconnect emits a new invalid publication frame with the last availabl
 source timestamp; it does not fabricate a new source time. Invalid/missing source
 time uses -1 and reason `invalid-timestamp`. Source device clocks may be uptime,
 not UTC; epoch/frame identity disambiguates reset and repeated timestamps.
+
+### Background model and historical compatibility
+
+The source reference is `esp32_ui/src/pages/dashboard/wavelet.tsx`, inspected at
+commit `b4e0c47`: `morletFreq`, `computeCWT`, and `synthesize`. Its historical input
+is a gap-filled hourly series; its 50 periods span 6–240 hours. Electric Sea uses
+48 periods spanning 1–20 seconds, a 60-second input window resampled at 20 Hz and
+boxcar-decimated to 5 Hz (300 analysis samples, zero-padded to 512 FFT bins).
+Historical short gaps (up to six hours) are interpolated and longer ones mean-filled;
+Electric Sea retains its stricter coverage checks and existing short-gap fill.
+These different temporal supports and preprocessing affect the fitted background.
+
+Both implementations subtract the full analysis-series mean (no additional linear
+detrend), use a one-sided Morlet with w0=6 and
+`H(omega,s) = pi^(-1/4) * exp(-(s*omega-6)^2/2) * sqrt(2*pi*s)` for omega>0,
+and an unnormalized forward FFT with inverse divided by Nfft. Both define power
+as `|W|^2/s`. Historical periods in hours are numerically periods in samples because
+there is one sample per hour. Electric Sea correctly uses
+`s = periodSeconds * sampleRate * 6/(2*pi)` and
+`f = 1/(periodSeconds * sampleRate)` cycles/sample, rather than using Hz in the
+AR factor. The historical arrays store float32 power/background; Electric Sea
+retains float64 internally and rounds only the OSC scale fields to float32.
+The physical values in the existing magnitude field do not change.
+
+`router/cwt.js:estimateAr1` already evaluates, on the same full decimated/gap-filled
+analysis series used for the CWT:
+
+```text
+x[t] = input[t] - mean(input)
+c0 = sum(x[t]^2)
+c1 = sum(x[t] * x[t+1])
+c2 = sum(x[t] * x[t+2])
+variance = c0/N
+alpha = clamp((c1/c0 + sqrt(max(0, c2/c0)))/2, 0, 0.99)
+```
+
+As in the historical implementation, lag sums use the common c0 denominator,
+without lag-dependent sample-count correction. Electric Sea already guards
+`c0 <= Number.EPSILON` by returning variance=alpha=0. Constant and numerically tiny
+signals therefore yield zero background; that is transmitted as unavailable for
+normalization, while any valid zero or tiny magnitude is preserved. The existing
+analyzer rejects windows with fewer than eight decimated samples before CWT.
+
+`computeCwt` already computes the following per scale and `summarizeCwt` retains it:
+
+```text
+R(f) = (1-alpha^2) / (1+alpha^2-2*alpha*cos(2*pi*f))
+B_s = variance * N/(Nfft*s) * R(f)
+```
+
+The existing alpha<0.01 white-noise shortcut uses R=1. The N/Nfft factor preserves
+the historical padding convention, and the 1/s factor matches the existing CWT
+power definition. Background has the **same units as power / magnitude squared**
+(signal units squared under this wavelet normalization). It is one modeled reference
+value per scale per analysis window, not a measured extra sensor stream and not a
+recent-window average. Magnitude still summarizes the final approximately 15 seconds
+of the same full analysis window used to estimate background.
+
+The formula is reused unchanged, since it already drives peak excess ratios.
+There is no duplicate fit/transform even when spectrum OSC is enabled. Disabling
+spectrum OSC does not skip the existing background calculation needed for tracked
+voices, and adds no new background-estimation work.
+
+### Background-normalized amplitude and its limits
+
+After reassembling a valid magnitude frame, for each backgroundValid=1 record:
+
+```text
+A_s = magnitude / sqrt(backgroundPower)
+    = sqrt(mean_recent(power_s[t]) / backgroundPower)
+```
+
+For backgroundValid=0, this ratio is unavailable; do not divide by the placeholder,
+substitute epsilon, or interpret 0/0 as zero. Magnitude-only synthesis remains
+possible. There is **no per-frame or dataset amplitude normalization** in the feed.
+Historical `synthesize` further divided by a maximum amplitude over its entire
+scale/time dataset, then normalized audio peaks; neither operation is added here.
+The live ratio is RMS significance over a recent interval, not the mean of the
+historical instantaneous `sqrt(power/background)` amplitudes.
+
+Physical CWT magnitude retains input-signal amplitude and its units. The ratio A
+is dimensionless spectral strength relative to that stream's fitted noise model.
+Rescaling a signal rescales both power and background quadratically, approximately
+cancelling from the ratio. Thus normalized significance does **not** preserve raw
+physical amplitude ratios across temperature, pressure, RMS or other sensor types;
+each has its own variance, autocorrelation, units and preprocessing. A is not an
+absolute loudness measurement or a calibrated probability of significance.
+
+Mathematical assumptions remain those of the existing model: stationarity within
+the window, an AR(1) approximation, evaluation at each wavelet's central frequency,
+and the historical N/Nfft padding correction. The background is not an exact
+integration of the AR spectrum over the discrete wavelet response, nor a validated
+finite-window/edge correction. Changing that model could affect peak extraction
+and is outside this compatibility extension. In particular, this change makes no
+claim that white-noise normalized power has mean exactly one at every time/scale.
+
+Numerical validation includes hand-counted ramp autocorrelations and an independent
+Fourier-series evaluation of the AR autocovariance at all 48 scales. A separate
+analytic fixture uses `x[n]=cos(pi*n/2)+0.25*(-1)^n`, n=0..15. Its known DFT bins,
+variance 9/16, and clamped alpha=0 give, at period four samples:
+
+```text
+recent mean power = 0.8862269254527579
+background power  = 0.14726215563702155
+normalized RMS    = 2.453165755612409
+```
+
+The direct CWT power-array reduction agrees within 1e-12; the OSC float32 magnitude
+and background recover the normalized RMS within 2e-7. This checks unit/scale and
+serialization consistency against an analytical reference, not against a second
+copy of the production computation.
+
+### Deploying v3
+
+Deploy the updated `router/ResidentStreamRegistry.js` and `router/spectrum-osc.js`
+with the rest of this commit, then restart both resident and router services.
+For the checked-in Pi layout, after updating `/home/pi/electric-sea`:
+
+```sh
+sudo systemctl restart router.service resident.service
+```
+
+Existing `.env` settings remain sufficient: `CWT_SPECTRUM_OSC_ENABLED=1` and the
+existing `CWT_SPECTRUM_OSC_INTERVAL_MS`. The router reads these; no new setting or
+service-unit change is needed. Default remains disabled. Update spectrum receivers
+to v3 and six-field, multi-packet decoding before use. Voice-only receivers continue
+to work unchanged. Check the existing OSC monitor below for version=3, total=48,
+and the complete offset ranges. This change has not been deployed to the Pi.
 
 ### Future work: phase-faithful reconstruction
 
@@ -423,10 +567,12 @@ thisProcess.removeOSCRecvFunc(~spectrumMonitor);
 ```
 
 No Pi analysis-frequency increase is made. At default scale count, the unchanged
-one-analysis-per-second round robin adds at most about 1096 bytes/second of spectrum
+one-analysis-per-second round robin adds at most about 1,716 bytes/second of spectrum
 payload per receiver in steady state (plus transition packets and network headers).
-A longer per-stream interval can lower this further. The extra work is 48 square
-roots/compact triples per analysis, validation and OSC encoding at publication,
-and a compact addition to the existing sidecar WebSocket frame. Disabled mode adds
-no spectrum UDP packets or encoding; the compact sidecar metadata remains present.
+A longer per-stream interval can lower this further. The pre-existing magnitude/phase
+path performs 48 square roots/compact records per analysis. V3 appends 48 already-computed background values, with validation
+and two extra OSC fields per scale. No additional transform or AR fit is run.
+This adds at most 384 bytes of numeric values to the per-frame JS arrays (excluding
+array overhead), plus their JSON representation on the existing sidecar connection.
+Disabled mode adds no spectrum UDP packets or encoding; the compact sidecar metadata remains present.
 No Pi CPU measurement or deployment is included in this change.

@@ -194,6 +194,8 @@ class ResidentStreamRegistry {
         scales: analysis.ready ? (analysis.scales || []).map(scale => [
           scale.frequencyHz, Math.sqrt(scale.recentPower),
           scale.phaseDefined === false ? null : scale.phase,
+          // Already computed for peak significance, in the same power units.
+          scale.backgroundPower,
         ]) : [],
       },
     };

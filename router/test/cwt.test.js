@@ -121,3 +121,33 @@ test('CWT rejects missing values rather than silently contaminating analysis', (
 
   assert.throws(() => computeCwt(values, { sampleRate: 10 }), /finite numbers/);
 });
+
+test('AR(1) estimate matches hand-counted ramp lags and backgrounds match a covariance-series reference', () => {
+  // For [0..7], mean=7/2, c0=42, c1=105/4, c2=23/2.
+  const values = Array.from({ length: 8 }, (_, i) => i);
+  const expectedAlpha = 0.5741340592361418; // (5/8 + sqrt(23/84))/2
+  const estimate = estimateAr1(values);
+  assert.equal(estimate.mean, 3.5);
+  assert.equal(estimate.variance, 5.25);
+  assert.ok(Math.abs(estimate.alpha - expectedAlpha) < 1e-15);
+  const result = computeCwt(values, { sampleRate: 5, minPeriodSeconds: 1, maxPeriodSeconds: 20, numScales: 48 });
+  assert.equal(result.backgroundPower.length, 48);
+  // Independent AR spectrum evaluation: Fourier series of autocovariance
+  // rho[k]=alpha^|k|, not the production rational spectral-factor formula.
+  for (let i = 0; i < 48; i++) {
+    const frequency = result.frequenciesHz[i] / 5;
+    let spectralFactor = 1;
+    for (let lag = 1; lag <= 200; lag++) {
+      spectralFactor += 2 * expectedAlpha ** lag * Math.cos(2 * Math.PI * frequency * lag);
+    }
+    const scaleSamples = result.periodsSeconds[i] * 5 * 6 / (2 * Math.PI);
+    const expected = 5.25 * spectralFactor / scaleSamples; // N=Nfft=8
+    assert.ok(Number.isFinite(result.backgroundPower[i]) && result.backgroundPower[i] > 0);
+    assert.ok(Math.abs(result.backgroundPower[i] - expected) < 1e-12);
+  }
+  assert.deepEqual(estimateAr1([7]), { mean: 7, variance: 0, alpha: 0 });
+  const constant = computeCwt(Array(8).fill(7), { sampleRate: 5, numScales: 48 });
+  assert.equal(constant.variance, 0);
+  assert.equal(constant.alpha, 0);
+  assert.ok([...constant.backgroundPower].every(value => value === 0));
+});

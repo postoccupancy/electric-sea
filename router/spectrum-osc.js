@@ -20,6 +20,11 @@ function phaseAvailable(phase) {
   return typeof phase === 'number' && Number.isFinite(phase) && Math.abs(phase) <= Math.PI;
 }
 
+function backgroundAvailable(background) {
+  return typeof background === 'number' && Number.isFinite(background) && background > 0
+    && Number.isFinite(Math.fround(background)) && Math.fround(background) > 0;
+}
+
 function validateSpectrum(frame) {
   if (!Number.isFinite(frame.timestampUs)) return 'invalid-timestamp';
   if (!frame.ready) return frame.reason || 'not-ready';
@@ -27,10 +32,12 @@ function validateSpectrum(frame) {
   if (!Array.isArray(scales) || scales.length === 0) return 'missing-scales';
   let previousFrequency = Infinity;
   for (const scale of scales) {
-    if (!Array.isArray(scale) || scale.length !== 3) return 'invalid-scale';
-    const [frequency, magnitude, phase] = scale;
-    // Missing/non-finite numeric phase does not invalidate spectral energy.
+    // Accept old sidecar triples during rollout; their background is unavailable.
+    if (!Array.isArray(scale) || (scale.length !== 3 && scale.length !== 4)) return 'invalid-scale';
+    const [frequency, magnitude, phase, background] = scale;
+    // Unavailable numeric phase/background do not invalidate spectral energy.
     if (phase != null && typeof phase !== 'number') return 'invalid-scale';
+    if (background != null && typeof background !== 'number') return 'invalid-scale';
     if (![frequency, magnitude].every(value => typeof value === 'number' && Number.isFinite(value)
       && Number.isFinite(Math.fround(value)))) return 'invalid-scale';
     if (!(frequency > 0) || !(Math.fround(frequency) > 0) || frequency >= previousFrequency
@@ -79,12 +86,12 @@ class SpectrumOsc {
     state.sequence++;
     const scales = reason ? [] : source.scales;
     const address = `/${frame.device}/cwt/spectrum`;
-    const header = [2, state.epoch, state.sequence,
+    const header = [3, state.epoch, state.sequence,
       Number.isFinite(frame.timestampUs) ? frame.timestampUs : -1,
       reason ? 0 : 1, reason, scales.length, 0, 0];
     const headerBytes = buildTypedOSCMessage(address, HEADER_TYPES, header).length;
-    // Each fffi record adds 16 payload bytes and 4 type-tag bytes; allow padding.
-    const perPacket = Math.floor((MAX_PACKET_BYTES - headerBytes - 3) / 20);
+    // Each fffifi record adds 24 payload bytes and 6 type-tag bytes; allow padding.
+    const perPacket = Math.floor((MAX_PACKET_BYTES - headerBytes - 3) / 30);
     if (perPacket < 1) return []; // Path too long to represent within the datagram budget.
     if (!scales.length) return [buildTypedOSCMessage(address, HEADER_TYPES, header)];
     const packets = [];
@@ -94,12 +101,14 @@ class SpectrumOsc {
       args[7] = offset;
       args[8] = count;
       for (let i = offset; i < offset + count; i++) {
-        const [frequency, magnitude, phase] = scales[i];
+        const [frequency, magnitude, phase, background] = scales[i];
         const valid = phaseAvailable(phase);
-        // The finite placeholder has no phase meaning unless the flag is 1.
-        args.push(frequency, magnitude, valid ? phase : 0, valid ? 1 : 0);
+        const backgroundValid = backgroundAvailable(background);
+        // Each finite placeholder has no meaning unless its corresponding flag is 1.
+        args.push(frequency, magnitude, valid ? phase : 0, valid ? 1 : 0,
+          backgroundValid ? background : 0, backgroundValid ? 1 : 0);
       }
-      packets.push(buildTypedOSCMessage(address, HEADER_TYPES + 'fffi'.repeat(count), args));
+      packets.push(buildTypedOSCMessage(address, HEADER_TYPES + 'fffifi'.repeat(count), args));
     }
     return packets;
   }
