@@ -6,6 +6,8 @@
 #wb-deployment input,#wb-deployment textarea{background:#080a0d;color:inherit;border:1px solid #33424e;padding:6px;font:inherit;width:100%;box-sizing:border-box}
 #wb-deployment label{display:block;margin:8px 0;color:#8ba0af}
 #wb-deployment form{max-width:520px}
+#wb-deployment pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5}
+#wb-deployment select{width:100%;background:#080a0d;color:inherit;padding:6px;border:1px solid #33424e}
 #wb-deployment .wb-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 #wb-deployment .wb-message{color:#ffcc66}
 #wb-deployment .wb-hint{color:#8ba0af;font-size:11px}

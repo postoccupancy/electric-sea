@@ -70,9 +70,22 @@ test('public reads use server credentials; session protects writes and logout re
   assert.equal((await fetch(endpoint + '/delete', { method: 'POST', headers, body: '{}' })).status, 404);
   assert.equal((await fetch(`${base}/api/deployments/unknown`, { headers })).status, 404);
   assert.equal(sent.length, 2);
+  assert.equal((await fetch(endpoint + '/history')).status, 200);
+  assert.equal(sent.at(-1).url, 'http://weather-brain:8000/nodes/electric-sky/deployments');
+  assert.equal(sent.at(-1).options.method, 'GET');
+  assert.equal(sent.at(-1).options.headers['X-Status-Token'], 'operator-test');
+  assert.equal((await fetch(endpoint + '/correction-preview', { method: 'POST', headers, body: '{}' })).status, 200);
+  assert.equal(sent.at(-1).options.headers['X-Status-Token'], 'operator-test');
+  assert.equal(sent.at(-1).options.headers['X-Ingest-Token'], undefined);
+  assert.equal((await fetch(endpoint + '/correction-apply', { method: 'POST', headers, body: '{}' })).status, 200);
+  assert.equal(sent.at(-1).options.headers['X-Ingest-Token'], 'ingest-secret');
+  assert.equal((await fetch(endpoint + '/correction-status')).status, 200);
+  assert.equal((await fetch(endpoint + '/correction-apply')).status, 404);
   await fetch(base + '/api/admin/logout', { method: 'POST', headers, body: '{}' });
   assert.equal((await (await fetch(base + '/api/admin/status', { headers })).json()).authenticated, false);
   assert.equal((await fetch(endpoint + '/start', { method: 'POST', headers, body: '{}' })).status, 401);
+  assert.equal((await fetch(endpoint + '/correction-apply', { method: 'POST', headers, body: '{}' })).status, 401);
+  assert.equal((await fetch(endpoint + '/correction-preview', { method: 'POST', headers, body: '{}' })).status, 401);
 });
 
 test('proxy fails closed without credentials and handles upstream errors', async t => {
@@ -94,7 +107,7 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
   const elements = new Map();
   const el = () => ({ hidden: false, value: '', textContent: '', disabled: false,
     addEventListener(event, handler) { this[event] = handler; }, focus() {}, reset() {} });
-  for (const name of ['auth', 'auth-cancel', 'editor', 'name', 'state', 'location', 'since', 'edit', 'end', 'message', 'refresh', 'lock', 'cancel', 'locate']) elements.set(name, el());
+  for (const name of ['auth', 'auth-cancel', 'editor', 'name', 'state', 'location', 'since', 'edit', 'end', 'message', 'refresh', 'lock', 'cancel', 'locate', 'correction', 'correct', 'history', 'timezone', 'preview', 'apply-correction', 'correction-cancel', 'rebuild-status', 'rebuild']) elements.set(name, el());
   const auth = elements.get('auth'), editor = elements.get('editor');
   auth.querySelectorAll = () => [];
   const adminButton = el();
@@ -104,12 +117,21 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
     querySelector: selector => selector === '[data-auth]' ? auth : selector === '[data-auth-message]' ? authMessage : elements.get('auth-cancel') };
   auth.elements = { password: el() };
   editor.elements = Object.fromEntries(['name', 'location_label', 'latitude', 'longitude', 'altitude_m', 'notes'].map(key => [key, el()]));
+  const correction = elements.get('correction');
+  correction.elements = Object.fromEntries(['transition', 'boundary', 'reason'].map(key => [key, el()]));
+  correction.elements.transition.replaceChildren = () => {};
+  correction.elements.transition.append = () => {};
+  correction.elements.transition.value = '0';
+  const history = [
+    { id: 'first', name: 'Home Office', location_label: 'Seattle', started_at: '2026-01-01T00:00:00Z', ended_at: '2026-01-05T00:00:00Z' },
+    { id: 'second', name: 'Gallery', started_at: '2026-01-05T00:00:00Z', ended_at: null }
+  ];
   const root = { dataset: { node: 'electric-sky' }, innerHTML: '',
     querySelector: selector => elements.get(selector.slice(6, -1)), querySelectorAll: () => [] };
   let active = null, locateCount = 0, authenticated = false;
   const requests = [];
   const context = {
-    document: { getElementById: id => ({ 'wb-deployment': root, 'es-admin-dialog': dialog, 'es-admin-toggle': adminButton }[id] || null) },
+    document: { createElement: () => el(), getElementById: id => ({ 'wb-deployment': root, 'es-admin-dialog': dialog, 'es-admin-toggle': adminButton }[id] || null) },
     navigator: { geolocation: { getCurrentPosition(success) { locateCount++; success({ coords: { latitude: 1, longitude: 2, altitude: null } }); } } },
     window: { confirm: () => true },
     fetch: async (url, options) => {
@@ -120,6 +142,12 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
         return { ok: true, json: async () => ({ authenticated }) };
       }
       requests.push({ url, options, body });
+      if (url.endsWith('/history')) return { ok: true, json: async () => ({ deployments: history }) };
+      if (url.endsWith('/correction-status')) return { ok: true, json: async () => ({ corrections: [] }) };
+      if (url.endsWith('/correction-preview')) return { ok: true, json: async () => ({ current: history, proposed: history,
+        preview_token: 'reviewed-token', interval: { start: body.boundary, end: history[1].started_at }, counts: [{ signal_id: 'temperature', count: 42 }],
+        snapshots: { start: body.boundary, end: history[1].started_at, hours: 48, scope: 'Includes baseline context' } }) };
+      if (url.endsWith('/correction-apply')) return { ok: true, json: async () => ({ rebuild_status: 'pending' }) };
       if (url.endsWith('/start')) active = { ...body, id: 'first', started_at: '2026-01-01T00:00:00Z' };
       if (url.endsWith('/change')) active = { ...body, id: 'second', started_at: '2026-01-02T00:00:00Z' };
       if (url.endsWith('/end')) active = null;
@@ -152,6 +180,22 @@ test('control starts, changes and ends using observed IDs; location is one-shot 
   assert.equal(requests[3].body.expected_deployment_id, 'second');
   assert.equal(elements.get('name').textContent, 'No active deployment');
   assert.equal(locateCount, 1);
+  await elements.get('correct').onclick();
+  assert.equal(correction.hidden, false);
+  assert.match(elements.get('history').textContent, /Home Office/);
+  correction.elements.boundary.value = '2026-01-03T00:00:00Z';
+  correction.elements.reason.value = 'Physical move recorded late';
+  correction.input();
+  assert.match(elements.get('timezone').textContent, /2026-01-03T00:00:00.000Z/);
+  correction.submit({ preventDefault() {} }); await settle();
+  assert.equal(elements.get('apply-correction').hidden, false);
+  assert.match(elements.get('preview').textContent, /42 measurements/);
+  correction.input();
+  assert.equal(elements.get('apply-correction').hidden, true);
+  correction.submit({ preventDefault() {} }); await settle();
+  await elements.get('apply-correction').onclick();
+  assert.equal(requests.find(r => r.url.endsWith('/correction-apply')).body.preview_token, 'reviewed-token');
+  assert.match(elements.get('message').textContent, /pending/);
   assert.ok(requests.every(r => !('X-Ingest-Token' in r.options.headers) && !('X-Status-Token' in r.options.headers)));
   await adminButton.onclick();
   assert.equal(elements.get('state').hidden, false);

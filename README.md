@@ -1,5 +1,13 @@
 # Resident Frequency — Pi Signal Router
 
+Deployment controls on `/indoor-sky/` and `/electric-sky/` distinguish **Change
+deployment** (a physical move now) from **Correct deployment history** (a recorded
+transition with the wrong timestamp). Corrections require an admin session,
+explicit timezone, reason, preview, and a separate Apply action. Snapshot rebuild
+progress and failures remain visible after the boundary update. Weather Brain
+credentials stay on the server; operators use **Unlock admin**, not a status token.
+See [deployment controls and archive pathways](docs/deployments.md).
+
 A portable signal routing system for live art-tech performance. Runs on a Raspberry Pi and connects sensors, MIDI controllers, microphones, and generative visual sketches into a shared signal pool — accessible to anyone on the local network via browser.
 
 Built by [Resident Frequency](https://residentfrequency.github.io), a Seattle-based art-tech-music collective.
