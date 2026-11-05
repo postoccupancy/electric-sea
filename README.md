@@ -21,6 +21,15 @@ Demo sites:
 Optional [Weather Brain archival forwarding](router/ARCHIVAL.md) stores one-second
 scalar statistics through the existing HTTP API while preserving live routing.
 
+Firmware sources are separate from this Pi router/browser repository:
+[Indoor Sky](https://github.com/postoccupancy/indoor-sky) owns the ESP32-S3 DevKit
+firmware, [USB contract](https://github.com/postoccupancy/indoor-sky/blob/main/docs/usb-protocol.md)
+and [Windows/Mac Pi-assisted flashing](https://github.com/postoccupancy/indoor-sky/blob/main/docs/deployment.md).
+Run its `scripts/deploy_usb_via_pi.sh` from the Indoor Sky checkout when deploying;
+the former Weather Brain `device/` path is retired. Outdoor ESP32-S3 CAM firmware
+remains in [Electric Sky](https://github.com/postoccupancy/electric-sky).
+Weather Brain continues to own the Python API, PostgreSQL, archives and analysis.
+
 ---
 
 ## What it does
