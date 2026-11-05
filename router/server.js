@@ -1115,7 +1115,7 @@ app.get('/modulation-spectrum/', (req, res) =>
 // ─── Start server ─────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0', () => {
+server.listen({ port: PORT, host: '::', ipv6Only: false }, () => {
   console.log(`Router running on port ${PORT}`);
   console.log(`OSC inbound on port ${OSC_IN_PORT} (all reachable senders)`);
   console.log(`OSC outbound on port ${OSC_OUT_PORT} (registered receive clients)`);
