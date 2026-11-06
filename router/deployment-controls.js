@@ -4,7 +4,7 @@ function injectDeploymentControl(html, node) {
   const control = `<section id="wb-deployment" data-node="${node}"></section>`;
   const title = node === 'electric-sky' ? 'ELECTRIC SKY' : 'INDOOR SKY';
   html = html.replace(/<h1\b[^>]*>[\s\S]*?<\/h1>/i,
-    `<h1 class="es-breadcrumb"><a href="/">ELECTRIC SEA</a> &middot; ${title}</h1>`)
+    `<h1 class="es-breadcrumb"><a href="/">RESIDENT FREQUENCY</a> &middot; ${title}</h1>`)
     .replace(/<\/header>/i, '<button id="es-admin-toggle" type="button">Unlock admin</button></header>');
   const withControl = /<\/header>/i.test(html) ? html.replace(/<\/header>/i, `</header>${control}`) :
     html.replace(/<body[^>]*>/i, match => match + control);

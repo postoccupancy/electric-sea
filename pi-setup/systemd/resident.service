@@ -1,7 +1,7 @@
 [Unit]
 Description=Resident Frequency Persistent-Spectrum Analysis
-After=network.target router.service
-Requires=router.service
+After=network.target rf-router.service
+Requires=rf-router.service
 
 [Service]
 Type=simple

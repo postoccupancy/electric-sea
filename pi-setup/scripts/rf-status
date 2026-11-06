@@ -3,9 +3,8 @@ echo "=== Resident Frequency Status ==="
 echo ""
 
 # Services
-systemctl is-active --quiet distance    && echo "✓ Distance sensor (distance)" || echo "✗ Distance sensor — run: sudo systemctl start distance"
 systemctl is-active --quiet controllers && echo "✓ MIDI controllers (controllers)" || true
-systemctl is-active --quiet router      && echo "✓ Router" || echo "✗ Router — run: sudo systemctl start router"
+systemctl is-active --quiet rf-router.service      && echo "✓ rf-router" || echo "✗ rf-router — run: sudo systemctl start rf-router.service"
 systemctl is-active --quiet cloudflared && echo "✓ Cloudflare tunnel" || echo "  Cloudflare tunnel not running (optional — run: sudo systemctl start cloudflared)"
 
 echo ""
@@ -83,12 +82,12 @@ if [ "$VSCODE" -gt 0 ]; then
   echo "⚠ VS Code Server ($VSCODE processes, ${VSCODE_MB}MB) — close Remote SSH to free RAM: pkill -9 -f vscode-server"
 fi
 
-ROUTER_PID=$(pgrep -f "node server.js")
-if [ -n "$ROUTER_PID" ]; then
+ROUTER_PID=$(systemctl show rf-router.service -p MainPID --value)
+if [ "${ROUTER_PID:-0}" -gt 0 ]; then
   ROUTER_MB=$(ps -p $ROUTER_PID -o rss= | awk '{printf "%.0f", $1/1024}')
-  echo "✓ Router (node server.js) PID $ROUTER_PID — ${ROUTER_MB}MB"
+  echo "✓ rf-router PID $ROUTER_PID — ${ROUTER_MB}MB"
 else
-  echo "✗ Router not running — run: sudo systemctl start router"
+  echo "✗ Router not running — run: sudo systemctl start rf-router.service"
 fi
 
 CLOUDFLARED_PID=$(pgrep cloudflared)
@@ -97,13 +96,11 @@ if [ -n "$CLOUDFLARED_PID" ]; then
   echo "✓ cloudflared PID $CLOUDFLARED_PID — ${CF_MB}MB"
 fi
 
-# Distance sensor and controllers — both run as main.py, distinguish by working dir
+# Optional Python controllers
 while IFS= read -r pid; do
   DIR=$(readlink /proc/$pid/cwd 2>/dev/null)
   MB=$(ps -p $pid -o rss= 2>/dev/null | awk '{printf "%.0f", $1/1024}')
-  if echo "$DIR" | grep -q "sensors/distance"; then
-    echo "✓ Distance sensor (main.py) PID $pid — ${MB}MB"
-  elif echo "$DIR" | grep -q "controllers"; then
+  if echo "$DIR" | grep -q "controllers"; then
     echo "✓ MIDI controllers (main.py) PID $pid — ${MB}MB"
   else
     echo "✓ main.py PID $pid — ${MB}MB ($DIR)"

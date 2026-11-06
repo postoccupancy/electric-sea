@@ -7,14 +7,14 @@ const express = require('express');
 const { injectDeploymentControl, installDeploymentProxy } = require('../deployment-controls');
 const { createAdmin } = require('../admin-session');
 
-test('both node dashboards gain one control without altering existing scripts', () => {
+test('both dashboards retain deployment controls with local Indoor HTML', () => {
   const html = '<html><head></head><body><header><h1>Sensor</h1></header><main>Scopes</main><script>live()</script></body></html>';
   for (const node of ['electric-sky', 'indoor-sky']) {
     const result = injectDeploymentControl(html, node);
     assert.ok(result.includes(`data-node="${node}"`));
     assert.ok(result.includes('<script>live()</script>'));
     assert.ok(result.includes('src="/deployment-control.js"'));
-    assert.ok(result.includes(`<a href="/">ELECTRIC SEA</a> &middot; ${node === 'electric-sky' ? 'ELECTRIC SKY' : 'INDOOR SKY'}`));
+    assert.ok(result.includes(`<a href="/">RESIDENT FREQUENCY</a> &middot; ${node === 'electric-sky' ? 'ELECTRIC SKY' : 'INDOOR SKY'}`));
     assert.equal((result.match(/id="es-admin-toggle"/g) || []).length, 1);
     assert.ok(result.indexOf('id="es-admin-toggle"') < result.indexOf('</header>'));
     assert.ok(result.includes('<dialog id="es-admin-dialog"'));
@@ -22,8 +22,9 @@ test('both node dashboards gain one control without altering existing scripts', 
   }
   assert.equal(injectDeploymentControl(html, 'unknown'), html);
   const server = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
-  assert.ok(server.includes("injectDeploymentControl(fs.readFileSync(INDOOR_DASHBOARD_CACHE, 'utf8'), 'indoor-sky')"));
-  assert.ok(server.includes("injectDeploymentControl(html, 'indoor-sky')"));
+  const indoor = fs.readFileSync(path.join(__dirname, '../indoor-sky.js'), 'utf8');
+  assert.ok(indoor.includes("'pages/indoor-sky.html'"));
+  assert.ok(indoor.includes("'indoor-sky'"));
   assert.ok(server.includes("injectDeploymentControl(transformElectricDashboard(html), 'electric-sky')"));
 });
 

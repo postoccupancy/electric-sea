@@ -1,6 +1,6 @@
 # Resident Frequency local recorder
 
-The recorder runs on the Mac, connects directly to the signal-router WebSocket,
+The recorder runs on the Mac, connects directly to the rf-router WebSocket,
 and writes scalar `osc/*` samples to hourly Parquet files. Binary PCM is ignored.
 
 Open the controls at:

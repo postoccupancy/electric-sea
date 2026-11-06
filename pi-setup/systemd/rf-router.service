@@ -1,13 +1,14 @@
 [Unit]
-Description=Resident Frequency Signal Router
-After=network.target
-Wants=resident.service
+Description=rf-router - Electric Sea signal router
+After=network.target router.service
+Conflicts=router.service
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/electric-sea/router
 ExecStart=/usr/bin/node server.js
+SyslogIdentifier=rf-router
 Restart=always
 RestartSec=5
 

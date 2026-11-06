@@ -40,10 +40,14 @@ test('bounded expiring sessions, same-origin protection, HTTPS cookie and shared
   env.ELECTRIC_SEA_ADMIN_PASSWORD = 'changed';
   assert.equal((await (await fetch(base + '/api/admin/status', { headers: { Cookie: fresh.headers.get('set-cookie').split(';')[0] } })).json()).authenticated, false);
   const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
-  for (const node of ['indoor-sky', 'electric-sky']) {
+  for (const node of ['electric-sky']) {
     assert.ok(source.includes(`app.post('/${node}/restart', admin.requireAdmin,`));
     assert.ok(!source.includes(`app.get('/${node}/restart'`));
   }
+  assert.ok(source.includes('requireAdmin: admin.requireAdmin'));
+  const indoor = fs.readFileSync(path.join(__dirname, '../indoor-sky.js'), 'utf8');
+  assert.ok(indoor.includes("app.post('/indoor-sky/restart', requireAdmin,"));
+  assert.ok(!indoor.includes("app.get('/indoor-sky/restart'"));
 });
 
 test('upstream errors and credential echoes never reach public responses', async t => {

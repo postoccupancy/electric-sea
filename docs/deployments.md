@@ -33,3 +33,8 @@ The Weather Brain repository contains [PowerShell archive examples](../../weathe
 and [snapshot generation and indexing](../../weather-brain/docs/electric-sea-snapshots.md).
 Deploy the Weather Brain migration and service update before enabling the Pi
 correction UI. Neither installation is restarted by these repository changes.
+
+Indoor Sky /indoor-sky/ HTML is canonical in rf-router pages/indoor-sky.html.
+Status, restart and PCM control use the existing USB session; stale/disconnected
+status returns 503 rather than falling back to device Wi-Fi. Electric Sky proxy
+behavior and Weather Brain routes/credentials are unchanged.

@@ -1,1 +1,2 @@
-sudo journalctl -u router -f
+#!/usr/bin/env bash
+exec sudo journalctl -u rf-router.service -f

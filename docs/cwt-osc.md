@@ -9,13 +9,12 @@ their existing formats and behavior.
 
 ## Running
 
-Run the router and resident sidecar together. The checked-in `router.service` now
-Wants `resident.service`; the latter already Requires/starts after the router and
-restarts on failure. Install both units, verify their WorkingDirectory paths match
-the installation (the existing templates use `/home/pi/pi-projects/router` and
-`/home/pi/electric-sea/router` respectively), then reload systemd and restart the
-services. No Pi deployment was performed by this change. For manual operation,
-start `node server.js` and `node resident-live-controls.js` in `router/`.
+Run rf-router and the optional resident sidecar together when analysis is intended.
+resident.service Requires/starts after rf-router.service; rf-router does not implicitly
+activate a currently inactive sidecar. Both use /home/pi/electric-sea/router.
+Follow [coordinated migration](rf-router-migration.md) for existing installations.
+For manual operation start node server.js and node resident-live-controls.js in router/.
+Restore an active sidecar after stopping/restarting its required router.
 The sidecar listens only on loopback port 3001; it reconnects after two seconds.
 
 ## Standalone receiver
@@ -510,7 +509,7 @@ with the rest of this commit, then restart both resident and router services.
 For the checked-in Pi layout, after updating `/home/pi/electric-sea`:
 
 ```sh
-sudo systemctl restart router.service resident.service
+sudo systemctl restart rf-router.service resident.service
 ```
 
 Existing `.env` settings remain sufficient: `CWT_SPECTRUM_OSC_ENABLED=1` and the

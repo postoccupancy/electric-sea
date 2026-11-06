@@ -151,3 +151,8 @@ by adding this code; configure the Pi environment to activate it.
 Run `node --test test/weather-brain-archive.test.js` from `router` for focused
 tests, or `npm test` for the router suite. Tests use fake clocks/transports and a
 loopback HTTP server; they do not write to Weather Brain.
+
+Indoor Sky /indoor-sky/ HTML is canonical in rf-router pages/indoor-sky.html.
+Status, restart and PCM control use the existing USB session; stale/disconnected
+status returns 503 rather than falling back to device Wi-Fi. Electric Sky proxy
+behavior and Weather Brain routes/credentials are unchanged.

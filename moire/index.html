@@ -447,7 +447,7 @@
   function signalKeyFor(data) {
     // type:'json' — device name already includes json/ prefix e.g. json/moire/phase
     if (data.type === 'json') return data.device || null;
-    // type:'osc' — device name includes osc/ prefix e.g. osc/pi-hc-sr04/distance-cm
+    // type:'osc' — device name includes osc/ prefix e.g. osc/indoor-sky/temperature
     if (data.type === 'osc') return data.device || `osc/${data.name}/${data.param}`;
     // type:'midi' — build key from device+channel+cc/note
     if (data.type === 'midi') {

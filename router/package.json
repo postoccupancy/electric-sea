@@ -1,9 +1,10 @@
 {
-  "name": "router",
+  "name": "rf-router",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Electric Sea signal router for the Resident Frequency interface",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
     "test": "node --test",
     "resident-live": "node resident-live-controls.js",
     "modulation-spectrum": "node modulation-spectrum-demo-v3.js"

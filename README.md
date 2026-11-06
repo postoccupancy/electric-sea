@@ -1,4 +1,4 @@
-# Resident Frequency — Pi Signal Router
+# Electric Sea — Raspberry Pi project
 
 Deployment controls on `/indoor-sky/` and `/electric-sky/` distinguish **Change
 deployment** (a physical move now) from **Correct deployment history** (a recorded
@@ -7,6 +7,10 @@ explicit timezone, reason, preview, and a separate Apply action. Snapshot rebuil
 progress and failures remain visible after the boundary update. Weather Brain
 credentials stay on the server; operators use **Unlock admin**, not a status token.
 See [deployment controls and archive pathways](docs/deployments.md).
+
+**rf-router** is the Node.js application; **Resident Frequency** is its browser interface.
+Indoor Sky dashboards are local files served by rf-router with USB status/control,
+not firmware HTTP or a persistent HTML cache. Electric Sky retains its Wi-Fi proxy.
 
 A portable signal routing system for live art-tech performance. Runs on a Raspberry Pi and connects sensors, MIDI controllers, microphones, and generative visual sketches into a shared signal pool — accessible to anyone on the local network via browser.
 
@@ -37,7 +41,7 @@ Weather Brain continues to own the Python API, PostgreSQL, archives and analysis
 The Pi acts as a hub. Every signal — environmental sensor readings, MIDI CC values from physical controllers, spectral audio analysis from microphones, derived values from generative visual sketches — enters the router as a WebSocket JSON message and is broadcast to all connected browsers. Each browser can receive signals as MIDI via the WebMIDI API, send MIDI back, or consume raw float values directly in JavaScript.
 
 **Signal sources:**
-- Physical sensors via GPIO (HC-SR04 ultrasonic distance, temperature, humidity)
+- Indoor Sky USB environmental/audio samples and Electric Sky Wi-Fi OSC/camera
 - MIDI controllers via browser WebMIDI API (Teensy, Akai, any USB MIDI device)
 - Virtual MIDI buses (IAC Driver on Mac, loopMIDI on Windows)
 - Microphone audio analysis via Web Audio API (RMS, spectral bands, centroid)
@@ -61,8 +65,6 @@ The Pi acts as a hub. Every signal — environmental sensor readings, MIDI CC va
 ## Hardware
 
 - Raspberry Pi 3B (Pi 4/5 recommended for production)
-- HC-SR04 ultrasonic distance sensor — GPIO 17 (trigger), 27 (echo)
-- Toggle button — GPIO 22 (enables/disables distance sensor)
 - TP-Link LS1008G 8-port Gigabit ethernet switch
 - USB-C/USB-A ethernet adapter for Mac connection
 
@@ -71,17 +73,13 @@ The Pi acts as a hub. Every signal — environmental sensor readings, MIDI CC va
 ## Project structure
 
 ```
-signal-router/
+electric-sea/
   router/           Node.js WebSocket/OSC signal router
     server.js
     audio-analysis.js  PCM FFT analysis for bass/mid/high/centroid routes
     package.json
     public/
       index.html    Router UI
-  sensors/
-    distance/       HC-SR04 ultrasonic distance sensor
-      main.py
-      requirements.txt
   controllers/      USB MIDI controller forwarding
     main.py
     requirements.txt  
@@ -118,25 +116,23 @@ sudo apt install -y nodejs
 node --version
 ```
 
-### 3. Python dependencies
-
-```bash
-sudo apt install python3-pip python3-gpiozero -y
-pip3 install -r sensors/distance/requirements.txt --break-system-packages
-
-# Optional - for enabling MIDI controllers via Pi's USB port, these are required:
-sudo apt install libasound2-dev -y
-pip3 install -r controllers/requirements.txt --break-system-packages
-```
-
-### 4. Clone the repo
+### 3. Clone the repo
 
 ```bash
 cd ~
-git clone https://github.com/residentfrequency/signal-router.git
-mv signal-router signal-router
-cd signal-router/router
-npm install
+git clone https://github.com/postoccupancy/electric-sea.git
+cd electric-sea/router
+npm ci
+```
+
+### 4. Optional Python MIDI controllers
+
+Python is not required by rf-router. Only when enabling the optional Pi USB MIDI
+controller forwarder, install its dependencies from the cloned checkout:
+
+```bash
+sudo apt install python3-pip libasound2-dev -y
+pip3 install -r ~/electric-sea/controllers/requirements.txt --break-system-packages
 ```
 
 ### 5. SSL certificate
@@ -144,57 +140,52 @@ npm install
 The router runs HTTPS. It first tries to use the Tailscale certificate, then falls back to a self-signed cert. Generate a self-signed cert for local use:
 
 ```bash
-cd ~/signal-router/router
+cd ~/electric-sea/router
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes \
   -subj "/CN=adrian-pi" \
   -addext "subjectAltName=DNS:adrian-pi,DNS:adrian-pi.local,DNS:localhost,IP:127.0.0.1,IP:10.0.0.1,IP:192.168.4.1"
 ```
 
-### 7. Systemd services
+### 7. rf-router systemd service
 
-Restart electric sea router
-```bash
-sudo systemctl restart router.service
-# check
-systemctl status router.service
-```
+The application is **rf-router**; the browser-facing interface remains **Resident Frequency**
+at `rf.postoccupancy.com`. The repository/checkout is `electric-sea` and the Node project
+stays in `router/`. Existing Pi installations must use the coordinated
+[migration and rollback procedure](docs/rf-router-migration.md), not install both units.
 
-Copy service files from `pi-setup/systemd/` to `/etc/systemd/system/`:
+For a fresh installation with no old router.service:
 
 ```bash
-sudo cp ~/signal-router/pi-setup/systemd/router.service /etc/systemd/system/
-sudo cp ~/signal-router/pi-setup/systemd/distance.service /etc/systemd/system/
-sudo cp ~/signal-router/pi-setup/systemd/controllers.service /etc/systemd/system/
+sudo install -m 644 ~/electric-sea/pi-setup/systemd/rf-router.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable router distance
-sudo systemctl start router distance
-sudo systemctl enable router controllers
-sudo systemctl start router controllers
+sudo systemctl enable --now rf-router.service
+systemctl status rf-router.service
 ```
 
-**router.service** runs `node server.js` from `~/signal-router/router/`
+It runs `/usr/bin/node server.js` in `/home/pi/electric-sea/router` with restart-always/5s.
+The optional `resident.service` requires rf-router; install/start it explicitly when
+analysis is intended. The optional MIDI controllers service remains disabled unless
+explicitly configured. The old GPIO publisher is retired; its live removal is part
+of the reviewed migration, not an automatic repository update.
 
-**distance.service** runs `python3 -u main.py` from `~/signal-router/sensors/distance/`
-
-**controllers.service** runs `python3 -u main.py` from `~/signal-router/controllers/` (optional)
-
-Check status:
 ```bash
-sudo systemctl status router
-sudo systemctl status distance
+sudo systemctl restart rf-router.service
+sudo journalctl -u rf-router.service -n 30
 ```
+
+If resident was active before a manual router stop, restore it explicitly afterward.
+Indoor Sky's compatible flashing tool does this automatically and verifies recovery.
 
 ### 8. Shell scripts
 
 Copy scripts to `/usr/local/bin/` and make executable:
 
 ```bash
-sudo cp ~/signal-router/pi-setup/scripts/* /usr/local/bin/
+sudo cp ~/electric-sea/pi-setup/scripts/* /usr/local/bin/
 sudo chmod +x /usr/local/bin/rf-status
 sudo chmod +x /usr/local/bin/wifi-mode
 sudo chmod +x /usr/local/bin/ap-mode
 sudo chmod +x /usr/local/bin/router-log
-sudo chmod +x /usr/local/bin/distance-log
 sudo chmod +x /usr/local/bin/kiosk
 ```
 
@@ -383,7 +374,6 @@ Example output:
 ```
 === Resident Frequency Status ===
 
-✓ Sensor (distance)
 ✓ Router
 ✓ Cloudflare tunnel
 
@@ -410,7 +400,6 @@ RAM: 248MB used / 921MB total (27% used)
 === Processes ===
 ✓ Router (node server.js) PID 825 — 51MB
 ✓ cloudflared PID 1823 — 22MB
-✓ Sensor (main.py) PID 832 — 28MB
 ```
 
 ### `router-log`
@@ -421,17 +410,7 @@ Tails the router service log in real time. Useful for debugging signal flow.
 router-log
 ```
 
-Runs: `sudo journalctl -u router -f`
-
-### `distance-log`
-
-Tails the sensor script log in real time.
-
-```bash
-distance-log
-```
-
-Runs: `sudo journalctl -u distance -f`
+Runs: `sudo journalctl -u rf-router.service -f`
 
 ### `kiosk`
 
@@ -464,33 +443,16 @@ X-GNOME-Autostart-enabled=true
 
 ### Deploy script
 
-A `deploy` script on your Mac copies files from the local `signal-router/` folder to the Pi via SCP. It lives in `~/bin/deploy` (not `/usr/local/bin` — macOS SIP prevents writing there).
-
-Setup:
-
-```bash
-mkdir -p ~/bin
-nano ~/bin/deploy
-chmod +x ~/bin/deploy
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-Usage:
-
-```bash
-deploy                                # rsync all changed files in signal-router/
-deploy moire/index.html               # copy one file
-deploy router/server.js               # copy server.js and restart router
-```
-
-Run from any subfolder — `deploy moire5.html` from inside `signal-router/moire/` resolves to the correct path automatically.
-
-The deploy script uses `pi@adrian-pi` (Tailscale MagicDNS) as the default target — works whether connected via ethernet, WiFi, or remotely.
+Application deployment is a reviewed source update followed by an explicitly
+authorized `rf-router.service` restart. Use [migration instructions](docs/rf-router-migration.md)
+for the service rename. Earlier private `~/bin/deploy` helpers are not distributed
+by this repository; audit their target paths and service commands before use.
+Do not assume a `deploy` command is installed. Indoor firmware has its independent
+[Windows/Mac flashing workflow](https://github.com/postoccupancy/indoor-sky/blob/main/docs/deployment.md).
 
 ### VS Code Remote SSH
 
-The VS Code Remote SSH extension is convenient for editing files on the Pi but **installs a Node.js server** that consumes ~400MB RAM on the Pi 3 — more than the router itself. Close the Remote SSH connection before a performance session. Use `deploy` from a local Terminal instead.
+The VS Code Remote SSH extension is convenient for editing files on the Pi but **installs a Node.js server** that consumes ~400MB RAM on the Pi 3 — more than the router itself. Close the Remote SSH connection before a performance session. Use a reviewed source transfer from a local terminal instead.
 
 ---
 
@@ -526,12 +488,12 @@ All signals broadcast as WebSocket JSON. Three message types reflecting the orig
 
 Every signal includes `min` and `max` fields declaring the expected value range. The router UI uses these to normalize raw values to MIDI 0–127. Signal sources are responsible for declaring their own range — the router does not infer or hardcode ranges.
 
-**osc** — physical sensor, originated as OSC UDP (distance sensor, Kinect, any OSC sender on port 5005):
+**osc** — physical sensor, originated as OSC UDP (Indoor Sky, Electric Sky, any OSC sender on port 5005):
 ```json
 {
   "type": "osc",
-  "device": "osc/pi-hc-sr04/distance-cm",
-  "value": 142.3,
+  "device": "osc/indoor-sky/temperature",
+  "value": 22.3,
   "min": 5,
   "max": 400,
   "source": "adrian-pi"
@@ -621,7 +583,7 @@ Every connected browser that has RECEIVE ON gets all signals as OSC UDP on port 
 
 OSC address format mirrors the device field:
 ```
-/osc/pi-hc-sr04/distance-cm   142.3  0.369
+/osc/indoor-sky/temperature   22.3  0.369
 /json/web-audio/centroid      0.476  0.476
 /midi/Teensy_MIDI/ch3/cc1     0.504  64
 ```
@@ -653,13 +615,12 @@ as a `sample_batch` containing timestamped per-channel sample arrays.
 
 | File | Purpose |
 |------|---------|
-| `/etc/systemd/system/router.service` | Router autostart |
-| `/etc/systemd/system/distance.service` | Distance sensor script autostart |
+| `/etc/systemd/system/rf-router.service` | Router autostart |
 | `/etc/systemd/system/controllers.service` | USB MIDI Controllers script autostart |
 | `/etc/cloudflared/config.yml` | Cloudflare tunnel config |
 | `/etc/hostapd/hostapd.conf` | AP mode SSID and password |
 | `/etc/NetworkManager/dispatcher.d/98-eth0-reconnect` | Auto-reconnect ethernet on WiFi up |
-| `~/signal-router/router/.env` | Supabase credentials (not in repo) |
+| `~/electric-sea/router/.env` | rf-router admin and Weather Brain connection credentials (not in repo) |
 | `~/.cloudflared/cert.pem` | Cloudflare auth certificate |
 | `/usr/local/bin/rf-status` | Status script |
 | `/usr/local/bin/wifi-mode` | WiFi management script |
@@ -692,10 +653,10 @@ sudo systemctl start cloudflared   # re-enable if stopped
 
 **Router not responding at :3000 but SSH works**
 ```bash
-sudo systemctl status router
-sudo journalctl -u router -n 20
+sudo systemctl status rf-router.service
+sudo journalctl -u rf-router.service -n 20
 ```
-Common cause: working directory not found after file reorganization. Check `WorkingDirectory` in `/etc/systemd/system/router.service`.
+Common cause: working directory not found after file reorganization. Check `WorkingDirectory` in `/etc/systemd/system/rf-router.service`.
 
 **Ethernet not connecting**
 Check carrier (physical cable) vs IP:
@@ -720,8 +681,6 @@ ps aux | grep node
 ```
 VS Code Remote SSH is the most common cause — kill it with `pkill -9 -f vscode-server`.
 
-**Distance sensor showing dashes in router**
-OSC packets from `sensors/distance/main.py` use subnet broadcast which doesn't loop back on Linux. Check `main.py` sends to both broadcast and `127.0.0.1`, and confirm the router is listening on UDP port 5005.
 
 **`wifi-mode` reports success but SSID unchanged**
 Network not in scan range. Run `sudo nmcli dev wifi rescan` then retry. Check signal strength with `sudo nmcli dev wifi list`.
@@ -747,5 +706,5 @@ Spectrum schema v3 adds the existing scale-specific AR(1) background power and
 calculate `magnitude / sqrt(backgroundPower)` only when `backgroundValid=1`; no
 automatic amplitude normalization is applied. The 48-scale frame now uses two
 packets under the existing 1,200-byte budget. Existing `.env` settings are sufficient;
-restart both router and resident services after deploying. These are temporal
+restart rf-router.service and the previously active resident.service only after deployment authorization. These are temporal
 energy/phase summaries; phase-faithful reconstruction remains separate future work.

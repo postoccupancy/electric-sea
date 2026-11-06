@@ -11,6 +11,10 @@ The probe was removed and its listener closed; production port 3000 was untouche
 
 After reviewing/deploying the change and authorizing a router restart, run on Pi:
 
+The application service is `rf-router.service`. Existing installations must first
+follow the [coordinated cutover](../docs/rf-router-migration.md); do not start it
+alongside the retired `router.service`.
+
 ```bash
 sudo ss -ltnp 'sport = :3000'
 curl --noproxy '*' -4 -kfsS https://127.0.0.1:3000/ -o /dev/null

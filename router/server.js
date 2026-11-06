@@ -1,3 +1,5 @@
+process.title = 'rf-router';
+const { installIndoorRoutes, writeUsbCommand, isIndoorPcm } = require('./indoor-sky');
 const express    = require('express');
 const { WebSocket, WebSocketServer } = require('ws');
 const https      = require('https');
@@ -52,65 +54,11 @@ app.use('/moire', express.static('../moire'));
 app.use('/visualizer', express.static('../visualizer'));
 app.use('/pcm', express.static('../pcm'));
 
-function fetchIndoor(path, res, transform) {
-  const request = http.get({ host: '192.168.0.32', port: 80, path, timeout: 8000 }, response => {
-    const chunks = [];
-    response.on('data', chunk => chunks.push(chunk));
-    response.on('end', () => {
-      let body = Buffer.concat(chunks);
-      if (transform) body = Buffer.from(transform(body.toString('utf8')));
-      res.status(response.statusCode || 200)
-        .type(response.headers['content-type'] || 'text/plain').send(body);
-    });
-  });
-  request.on('timeout', () => request.destroy(new Error('indoor-sky timeout')));
-  request.on('error', error => res.status(502).type('text/plain')
-    .send(`indoor-sky unavailable: ${error.message}`));
-}
-const INDOOR_DASHBOARD_CACHE = `${os.homedir()}/.cache/signal-router/indoor-sky.html`;
-function transformIndoorDashboard(html) {
-  return html
-    .replace("'wss://adrian-pi:3000'", "'wss://'+location.host")
-    .replace("fetch('/status'", "fetch('/indoor-sky/status'")
-    .replace("fetch('/restart'", "fetch('/indoor-sky/restart'");
-}
-function refreshIndoorDashboard(callback = () => {}) {
-  const request = http.get({ host: '192.168.0.32', port: 80, path: '/dashboard', timeout: 8000 }, response => {
-    const chunks = [];
-    response.on('data', chunk => chunks.push(chunk));
-    response.on('end', () => {
-      if (response.statusCode !== 200) return callback(new Error(`dashboard HTTP ${response.statusCode}`));
-      const html = transformIndoorDashboard(Buffer.concat(chunks).toString('utf8'));
-      try {
-        fs.mkdirSync(`${os.homedir()}/.cache/signal-router`, { recursive: true });
-        fs.writeFileSync(INDOOR_DASHBOARD_CACHE, html);
-      } catch (error) { return callback(error); }
-      callback(null, html);
-    });
-  });
-  request.on('timeout', () => request.destroy(new Error('indoor-sky dashboard timeout')));
-  request.on('error', callback);
-}
-app.get(/^\/indoor-sky$/, (req, res) => res.redirect(308, '/indoor-sky/'));
-app.get('/indoor-sky/', (req, res) => {
-  if (fs.existsSync(INDOOR_DASHBOARD_CACHE)) {
-    res.type('text/html').send(injectDeploymentControl(fs.readFileSync(INDOOR_DASHBOARD_CACHE, 'utf8'), 'indoor-sky'));
-    refreshIndoorDashboard(error => { if (error) console.warn(`Indoor dashboard refresh: ${error.message}`); });
-    return;
-  }
-  refreshIndoorDashboard((error, html) => error
-    ? res.status(502).type('text/plain').send(`indoor-sky dashboard unavailable: ${error.message}`)
-    : res.type('text/html').send(injectDeploymentControl(html, 'indoor-sky')));
-});
-app.get('/indoor-sky/status', (req, res) => {
-  if (indoorUsbStatus && Date.now() - indoorUsbStatusAt < 5000) {
-    return res.json({ ...indoorUsbStatus, usb_router: indoorUsbBoundaryStatus() });
-  }
-  fetchIndoor('/status', res);
-});
-app.post('/indoor-sky/restart', admin.requireAdmin, (req, res) => {
-  if (sendIndoorUsbCommand('INRS')) return res.type('text/plain').send('restarting over USB');
-  fetchIndoor('/restart', res);
+installIndoorRoutes(app, {
+  requireAdmin: admin.requireAdmin,
+  getUsb: () => ({ connected: Boolean(pcmUsbStream && Number.isInteger(pcmUsbStream.fd) && pcmUsbStream.fd >= 0),
+    status: indoorUsbStatus, receivedAt: indoorUsbStatusAt, diagnostics: indoorUsbBoundaryStatus() }),
+  sendCommand: command => sendIndoorUsbCommand(command)
 });
 
 function fetchElectric(path, res, transform) {
@@ -166,7 +114,7 @@ installDeploymentProxy(app, admin.requireAdmin);
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
-const state = { distance: 0, rate: 0 };
+const state = {};
 const sourceNames = new Map();
 const audioCapabilities = new Map();
 let lastIndoorUsbScalarAt = 0;
@@ -520,16 +468,17 @@ function pcmSourceIp(device) {
 
 function updatePcmSource(device) {
   const ip = pcmSourceIp(device);
-  if (!ip) return;
   const enabled = pcmSourceEnabled.get(device) === true;
-  const usb = ip === '192.168.0.32' && fs.existsSync(PCM_USB_DEVICE);
-  if (usb) {
-    sendIndoorUsbCommand(enabled ? 'INP1' : 'INP0');
+  if (isIndoorPcm(device, sourceNames.get(ip))) {
+    if (!sendIndoorUsbCommand(enabled ? 'INP1' : 'INP0')) {
+      console.warn('Indoor PCM control unavailable over USB');
+    }
     if (!enabled) markPcmDerivedUnavailable(device);
     return;
   }
+  if (!ip) return;
   const request = http.get({ host: ip, port: 80,
-    path: `/audio/${usb ? 'usb' : 'raw'}?enabled=${enabled ? 1 : 0}`, timeout: 3000 }, response => response.resume());
+    path: `/audio/raw?enabled=${enabled ? 1 : 0}`, timeout: 3000 }, response => response.resume());
   request.on('timeout', () => request.destroy());
   request.on('error', error => console.warn(`PCM control ${ip}: ${error.message}`));
 }
@@ -749,20 +698,7 @@ let indoorUsbStatus = null;
 let indoorUsbStatusAt = 0;
 
 function sendIndoorUsbCommand(command) {
-  if (!fs.existsSync(PCM_USB_DEVICE) || Buffer.byteLength(command) !== 4) return false;
-  try {
-    if (pcmUsbStream && Number.isInteger(pcmUsbStream.fd)) {
-      fs.writeSync(pcmUsbStream.fd, command);
-      return true;
-    }
-    const descriptor = fs.openSync(PCM_USB_DEVICE, 'r+');
-    try { fs.writeSync(descriptor, command); }
-    finally { fs.closeSync(descriptor); }
-    return true;
-  } catch (error) {
-    console.warn(`Indoor USB command: ${error.message}`);
-    return false;
-  }
+  return writeUsbCommand(pcmUsbStream, command);
 }
 
 function consumeUsbBytes(pending, chunk, source) {
@@ -830,12 +766,18 @@ function openPcmUsb() {
     const descriptor = fs.openSync(PCM_USB_DEVICE, 'r+');
     pcmUsbStream = fs.createReadStream(null, { fd: descriptor, autoClose: true });
     pcmUsbStream.on('data', chunk => {
+      // Preserve the legacy source key; Indoor control never uses it for HTTP.
       pcmUsbPending = consumeUsbBytes(pcmUsbPending, chunk, '192.168.0.32');
     });
     pcmUsbStream.on('error', error => console.warn(`PCM USB: ${error.message}`));
     pcmUsbStream.on('close', () => {
       pcmUsbStream = null;
       pcmUsbPending = Buffer.alloc(0);
+      indoorUsbStatus = null;
+      indoorUsbStatusAt = 0;
+      const capability = audioCapabilities.get('pcm/indoor-sky/audio');
+      if (capability) { capability.available = false; broadcast({ ...capability }); }
+      markPcmDerivedUnavailable('pcm/indoor-sky/audio');
     });
     console.log(`PCM USB listening on ${PCM_USB_DEVICE}`);
   } catch (error) {
@@ -1116,7 +1058,7 @@ app.get('/modulation-spectrum/', (req, res) =>
 
 const PORT = process.env.PORT || 3000;
 server.listen({ port: PORT, host: '::', ipv6Only: false }, () => {
-  console.log(`Router running on port ${PORT}`);
+  console.log(`rf-router running on port ${PORT}`);
   console.log(`OSC inbound on port ${OSC_IN_PORT} (all reachable senders)`);
   console.log(`OSC outbound on port ${OSC_OUT_PORT} (registered receive clients)`);
 });
